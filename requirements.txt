@@ -1,0 +1,5 @@
+langchain
+langchain-community
+slack-bolt
+python-dotenv
+requests
