@@ -1,4 +1,4 @@
-# GenAI-Slack-Thread-and-Chat-Bot 🤖
+# GenAI-Slack-Thread-Reader-and-Chat-Bot 🤖
 
 [![Slack](https://img.shields.io/badge/Slack-Compatible-blue?logo=slack)]
 
