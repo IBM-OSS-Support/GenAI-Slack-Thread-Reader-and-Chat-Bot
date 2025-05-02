@@ -1,15 +1,16 @@
 import logging
+import os
 from langchain_community.llms import Ollama
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
 from langchain.memory import ConversationBufferMemory
 
 logger = logging.getLogger(__name__)
-
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 # Initialize local Granite model
 llm = Ollama(
     model="granite3.3:8b",
-    base_url="http://localhost:11434"
+    base_url=OLLAMA_BASE_URL
 )
 
 prompt = PromptTemplate(
