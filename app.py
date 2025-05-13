@@ -6,6 +6,7 @@ import time
 import re
 import sys
 import logging
+import requests
 
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
@@ -32,17 +33,46 @@ try:
     _EXPIRATION_SECONDS = int(os.getenv("SESSION_EXPIRATION_SECONDS", "600"))
 except ValueError:
     logging.warning("Invalid SESSION_EXPIRATION_SECONDS, defaulting to 600")
-    _EXPIRATION_SECONDS = 60
+    _EXPIRATION_SECONDS = 600
 
+mins = _EXPIRATION_SECONDS // 60
 _last_activity: dict[str, float] = {}
 _active_sessions: dict[str, float] = {}
 _unique_users: set[str] = set()
 _command_counts: dict[str, int] = {}
 
+def get_channel_name(channel_id: str) -> str:
+    try:
+        resp = requests.get(
+            "https://slack.com/api/conversations.info",
+            headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
+            params={"channel": channel_id},
+            timeout=5
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("ok"):
+            return f"#{data['channel']['name']}"
+    except Exception:
+        logging.exception(f"Failed to fetch channel info for {channel_id}")
+    return f"#{channel_id}"
+
 def resolve_user_mentions(text: str) -> str:
-    # Replace both <@UXXXX> and @UXXXX with readable names
-    text = re.sub(r'<@([U][A-Z0-9]{8,})>', lambda m: f"@{get_user_name(m.group(1))}", text)
-    text = re.sub(r'@([U][A-Z0-9]{8,})', lambda m: f"@{get_user_name(m.group(1))}", text)
+    # Fix malformed mentions like @<@UXXXX> or @<UXXXX>
+    text = re.sub(r'@<(@?[UW][A-Z0-9]{8,})>', r'<\1>', text)
+
+    # Handle malformed <UXXXXXXX> without @ (rare but needs catching)
+    text = re.sub(r'<([UW][A-Z0-9]{8,})>', lambda m: f"@{get_user_name(m.group(1))}", text)
+
+    # Replace user mentions like <@UXXXX> or <@WXXXX>
+    text = re.sub(r'<@([UW][A-Z0-9]{8,})>', lambda m: f"@{get_user_name(m.group(1))}", text)
+
+    # Replace bare user IDs like @UXXXX or @WXXXX
+    text = re.sub(r'@([UW][A-Z0-9]{8,})', lambda m: f"@{get_user_name(m.group(1))}", text)
+
+    # Replace channel mentions like <#CXXXX|channel-name>
+    text = re.sub(r'<#(C[A-Z0-9]{8,})(?:\\|[^>]+)?>', lambda m: get_channel_name(m.group(1)), text)
+
     return text
 
 def track_usage(user_id: str, thread_ts: str, command: str = None):
@@ -60,7 +90,6 @@ def get_bot_stats() -> str:
         f"📊 Bot Usage Stats:\n"
         f"• Unique users: {len(_unique_users)}\n"
         f"• Live sessions: {active_count}\n"
-        # f"• Command usage: {sum(_command_counts.values())} total\n"
     )
     return stats
 
@@ -84,7 +113,7 @@ def handle_message_events(event, say):
             _memories.pop(invoke_ts, None)
             _last_activity.pop(invoke_ts, None)
             _active_sessions.pop(invoke_ts, None)
-            send_message(channel, "⚠️ Your conversation has expired (10 minutes of no activity). Please start a new one.", invoke_ts)
+            send_message(channel, "⚠️ Your conversation has expired ({mins} minutes of no activity). Please start a new one.", invoke_ts)
             return
 
         normalized = re.sub(r"<(https?://[^>|]+)(?:\|[^>]+)?>", r"\1", text).strip()
@@ -138,7 +167,7 @@ def handle_app_mention(event, say):
     app.logger.debug("🔔 Received app_mention event: %s", pretty_text)
 
     if pretty_text.strip() == f"{BOT_USER_ID}":
-        send_message(channel, "👋 Hello! Here's how you can use me:\n- Paste a Slack thread URL with 'analyze', 'summarize', or 'explain'.\n- Mention me to start a chat.\n- Reply in a thread to continue with memory.\n- Mention me with 'stats' to view usage.", invoke_ts)
+        send_message(channel, "👋 Hello! Here's how you can use me:\n- Paste a Slack thread URL with 'analyze', 'summarize', or 'explain'.\n- Mention me to start a chat.\n- Reply in a thread to continue with memory.", invoke_ts)
         return
 
     cleaned_text = re.sub(r"<@[^>]+>", "", text).strip()
