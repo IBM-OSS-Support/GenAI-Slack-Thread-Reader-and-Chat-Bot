@@ -44,6 +44,7 @@ SLACK_SIGNING_SECRET=your-signing-secret
 SLACK_APP_TOKEN=your-app-token
 BOT_USER_ID=your-bot-user-id
 OLLAMA_BASE_URL=http://localhost:11434
+SESSION_EXPIRATION_SECONDS=expiration-time-in-seconds
 ```
 
 > 🔒 Make sure `.env` is added to `.gitignore`!
