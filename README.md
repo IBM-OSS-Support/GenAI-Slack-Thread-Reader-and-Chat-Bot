@@ -113,6 +113,7 @@ OLLAMA_BASE_URL=http://localhost:11434
    SLACK_SIGNING_SECRET=your-signing-secret
    BOT_USER_ID=your-bot-user-id
    OLLAMA_BASE_URL=http://localhost:11434
+   SESSION_EXPIRATION_SECONDS=expiration-time-in-seconds
    ```
 
 No public endpoint is required—your bot communicates over Socket Mode! 🚀
