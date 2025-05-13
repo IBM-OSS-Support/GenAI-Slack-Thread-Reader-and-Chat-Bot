@@ -2,6 +2,7 @@ from dotenv import load_dotenv
 load_dotenv()  # must precede any os.getenv() calls
 
 import os
+import time
 import re
 import sys
 import logging
@@ -10,7 +11,7 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from utils.slack_api import send_message
-from chains.chat_chain_mcp import process_message_mcp, _get_memory
+from chains.chat_chain_mcp import process_message_mcp, _get_memory, _memories
 from chains.analyze_thread import analyze_slack_thread
 from utils.slack_tools import get_user_name
 
@@ -24,12 +25,22 @@ SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
 SLACK_APP_TOKEN = os.getenv("SLACK_APP_TOKEN")
 BOT_USER_ID     = os.getenv("BOT_USER_ID")
 
-for name in ("SLACK_BOT_TOKEN","SLACK_APP_TOKEN","BOT_USER_ID"):
+for name in ("SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "BOT_USER_ID"):
     if not os.getenv(name):
         print(f"⚠️ Missing env var: {name}")
         sys.exit(1)
 
 app = App(token=SLACK_BOT_TOKEN)
+
+# ——————————————————————————————————————————————
+# Idle session tracking: expire after 10 minutes of no activity
+try:
+    _EXPIRATION_SECONDS = int(os.getenv("SESSION_EXPIRATION_SECONDS", "600"))
+except ValueError:
+    logging.warning("Invalid SESSION_EXPIRATION_SECONDS, defaulting to 600")
+    _EXPIRATION_SECONDS = 600
+_last_activity: dict[str, float] = {}
+# ——————————————————————————————————————————————
 
 @app.event("message")
 def handle_message_events(event, say):
@@ -43,17 +54,34 @@ def handle_message_events(event, say):
     if subtype == "bot_message" or event.get("bot_id"):
         return
 
-    # 1️⃣ Direct messages (DMs): support both analyze-threads and normal chat
+    # Only in direct messages
     if channel and channel.startswith("D"):
         invoke_ts = thread_ts or ts
 
-        # normalize any <link|label> to plain URL
+        # —— session-expiration check ——
+        now = time.time()
+        last = _last_activity.get(invoke_ts)
+        if last and now - last > _EXPIRATION_SECONDS:
+            # Drop the old memory and expiration record
+            _memories.pop(invoke_ts, None)
+            _last_activity.pop(invoke_ts, None)
+            send_message(
+                channel,
+                "⚠️ Your conversation has expired (10 minutes of no activity). Please start a new one.",
+                invoke_ts
+            )
+            return
+        # Update last‐seen timestamp
+        _last_activity[invoke_ts] = now
+        # —— end expiration logic ——
+
+        # Normalize any <link|label> to plain URL
         normalized = re.sub(r"<(https?://[^>|]+)(?:\|[^>]+)?>", r"\1", text).strip()
         keywords   = ["analyze", "explain", "summarize", "analyse"]
         match      = re.search(r"https://[^/]+/archives/([^/]+)/p(\d+)", normalized, re.IGNORECASE)
 
         if match and any(kw in normalized.lower() for kw in keywords):
-            # ── thread analysis in DM
+            # ── Thread analysis in DM
             target_channel = match.group(1)
             raw_ts         = match.group(2)
             target_ts      = raw_ts[:10] + "." + raw_ts[10:]
@@ -62,7 +90,8 @@ def handle_message_events(event, say):
                 summary = analyze_slack_thread(target_channel, target_ts)
                 send_message(channel, summary.replace("**", "*"), invoke_ts)
             except Exception as e:
-                send_message(channel,
+                send_message(
+                    channel,
                     f"❌ Could not fetch that thread: {e}\n"
                     "• Invite me to that channel.\n"
                     "• Ensure I have `conversations.replies` & `channels:history` scopes.",
@@ -70,7 +99,7 @@ def handle_message_events(event, say):
                 )
             return
 
-        # ── fallback to normal DM chat
+        # ── Fallback to normal DM chat
         reply = process_message_mcp(text, invoke_ts)
         if reply:
             send_message(channel, reply, invoke_ts)
@@ -83,6 +112,21 @@ def handle_app_mention(event, say):
     ts        = event.get("ts")
     thread_ts = event.get("thread_ts")
     invoke_ts = thread_ts or ts
+
+    # —— session-expiration check ——
+    now = time.time()
+    last = _last_activity.get(invoke_ts)
+    if last and now - last > _EXPIRATION_SECONDS:
+        _memories.pop(invoke_ts, None)
+        _last_activity.pop(invoke_ts, None)
+        send_message(
+            channel,
+            "⚠️ Your conversation has expired (10 minutes of no activity). Please start a new one.",
+            invoke_ts
+        )
+        return
+    _last_activity[invoke_ts] = now
+    # —— end expiration logic ——
 
     # Replace mention with readable name
     pretty_text = re.sub(
@@ -108,7 +152,7 @@ def handle_app_mention(event, say):
     cleaned_text = re.sub(r"<@[^>]+>", "", text).strip()
     normalized   = re.sub(r"<(https?://[^>|]+)(?:\|[^>]+)?>", r"\1", cleaned_text).strip()
 
-    keywords = ["","analyze", "explain", "summarize", "analyse"]
+    keywords = ["", "analyze", "explain", "summarize", "analyse"]
     match    = re.search(r"https://[^/]+/archives/([^/]+)/p(\d+)", normalized)
 
     if match:
