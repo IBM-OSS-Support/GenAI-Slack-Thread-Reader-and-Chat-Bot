@@ -38,7 +38,7 @@ Produce **exactly** these five sections, using Slack markdown *only*:
 • 3-5 concise bullets.
 
 *Decisions Made:*  
-• Bullets prefixed with who (e.g. “@Mei Matteson: Updated the case…”).
+• Bullets prefixed with who.
 
 *Action Items:*  
 • Bullets prefixed with @username and include due-dates if mentioned.
