@@ -20,15 +20,33 @@ def send_message(channel_id: str, text: str, thread_ts: str = None) -> None:
         "channel": channel_id,
         "text": text,
         "blocks": [
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": text
-                }
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": text
             }
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "👍"},
+                    "value": "thumbs_up",
+                    "action_id": "vote_up"
+                },
+                {
+                    "type": "button",
+                    "text": {"type": "plain_text", "text": "👎"},
+                    "value": "thumbs_down",
+                    "action_id": "vote_down"
+                }
+            ]
+        }
         ]
     }
+
     if thread_ts:
         payload["thread_ts"] = thread_ts
     try:
