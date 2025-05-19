@@ -14,6 +14,9 @@ COPY . .
 # Install required packages
 RUN pip install --no-cache-dir -r requirements.txt
 
+#directory for persistent stats 
+RUN mkdir -p /app/data
+
 EXPOSE 3000
 
 # Run the bot
