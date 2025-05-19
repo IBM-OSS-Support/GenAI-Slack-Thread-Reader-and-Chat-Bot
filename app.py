@@ -53,7 +53,8 @@ def load_stats():
         return {
             "thumbs_up": data.get("thumbs_up", 0),
             "thumbs_down": data.get("thumbs_down", 0),
-            "unique_users": set(data.get("unique_users", [])),
+            # initialize a dummy set of the stored count so we preserve total
+            "unique_users": set(range(data.get("unique_user_count", 0))),
         }
     except FileNotFoundError:
         return {"thumbs_up": 0, "thumbs_down": 0, "unique_users": set()}
@@ -70,7 +71,7 @@ def save_stats():
                 {
                     "thumbs_up": _vote_up_count,
                     "thumbs_down": _vote_down_count,
-                    "unique_users": list(_unique_users),
+                    "unique_user_count": len(_unique_users),
                 },
                 f,
             )
