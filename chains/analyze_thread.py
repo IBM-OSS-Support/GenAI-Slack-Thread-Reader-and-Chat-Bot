@@ -31,7 +31,11 @@ Produce **exactly** these five sections, using Slack markdown *only*:
 
 *Business Impact:*  
 • Bullet on revenue at risk.  
-• Bullet on operational impact.  
+• Bullet on operational impact.
+• Bullet on customer impact if there is any.
+• Bullet on team impact if there is any.
+• Bullet on other impact if there is any.
+• Bullet on other impact if there is any.  
 
 *Key Points Discussed:*  
 • 3–5 concise bullets.
