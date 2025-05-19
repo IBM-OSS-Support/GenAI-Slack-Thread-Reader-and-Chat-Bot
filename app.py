@@ -210,7 +210,7 @@ def track_usage(user_id: str, thread_ts: str, command: str = None):
 def get_bot_stats() -> str:
     return (
         f"📊 Bot Usage Stats:\n\n"
-        f" Unique users: {len(_unique_users)}\n\n"
+        # f" Unique users: {len(_unique_users)}\n\n"
         f" 👍 Votes: {_vote_up_count}\n\n"
         f" 👎 Votes: {_vote_down_count}\n\n"
     )
