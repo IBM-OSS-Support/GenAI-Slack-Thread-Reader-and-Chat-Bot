@@ -1,20 +1,18 @@
-from dotenv import load_dotenv
-load_dotenv()  # must precede any os.getenv() calls
-
 import os
 import time
 import re
 import sys
 import logging
 import requests
-
+from dotenv import load_dotenv
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
-
 from utils.slack_api import send_message
 from chains.chat_chain_mcp import process_message_mcp, _get_memory, _memories
 from chains.analyze_thread import analyze_slack_thread
 from utils.slack_tools import get_user_name
+from chains.stats_store import load_stats, save_stats, add_vote, get_stats
+
 
 # —————————————————————————————————————————————
 # Logging & Env
@@ -46,10 +44,10 @@ _active_sessions: dict[str, float] = {}
 _unique_users: set[str] = set()
 _command_counts: dict[str, int] = {}
 _vote_registry: dict[str, set[str]] = {}
-_vote_up_count = 0
-_vote_down_count = 0
 _already_warned: dict[str, set[str]] = {}
 
+# Load initial stats
+load_stats()
 
 # —————————————————————————————————————————————
 # Helpers
@@ -70,7 +68,6 @@ def get_channel_name(channel_id: str) -> str:
         logging.exception(f"Failed to fetch channel info for {channel_id}")
     return f"#{channel_id}"
 
-
 def resolve_user_mentions(text: str) -> str:
     text = re.sub(r'@<(@?[UW][A-Z0-9]{8,})>', r'<\1>', text)
     text = re.sub(r'<([UW][A-Z0-9]{8,})>', lambda m: f"@{get_user_name(m.group(1))}", text)
@@ -83,14 +80,11 @@ def resolve_user_mentions(text: str) -> str:
 def handle_vote_up(ack, body, client):
     _handle_vote(body, client, vote_type="up", emoji="👍")
 
-
 @app.action("vote_down")
 def handle_vote_down(ack, body, client):
     _handle_vote(body, client, vote_type="down", emoji="👎")
 
 def _handle_vote(body, client, vote_type: str, emoji: str):
-    global _vote_up_count, _vote_down_count
-
     user_id = body["user"]["id"]
     message_ts = body["message"]["ts"]
     channel_id = body["channel"]["id"]
@@ -118,15 +112,16 @@ def _handle_vote(body, client, vote_type: str, emoji: str):
     _vote_registry[message_ts].add(user_id)
 
     if vote_type == "up":
-        _vote_up_count += 1
+        add_vote("up", user_id)
     else:
-        _vote_down_count += 1
+        add_vote("down", user_id)
 
     client.chat_postMessage(
         channel=channel_id,
         thread_ts=message_ts,
         text=f"Thanks for your feedback {emoji}"
     )
+
 def track_usage(user_id: str, thread_ts: str, command: str = None):
     now = time.time()
     _active_sessions[thread_ts] = now
@@ -135,15 +130,14 @@ def track_usage(user_id: str, thread_ts: str, command: str = None):
     if command:
         _command_counts[command] = _command_counts.get(command, 0) + 1
 
-
 def get_bot_stats() -> str:
+    stats = get_stats()
     return (
         f"📊 Bot Usage Stats:\n\n"
-        f" Unique users: {len(_unique_users)}\n\n"
-        f" 👍 Votes: {_vote_up_count}\n\n"
-        f" 👎 Votes: {_vote_down_count}\n\n"
+        f" Unique users: {stats['unique_users_count']}\n\n"
+        f" 👍 Votes: {stats['vote_up_count']}\n\n"
+        f" 👎 Votes: {stats['vote_down_count']}\n\n"
     )
-
 
 def process_conversation(event, text: str):
     channel   = event["channel"]
