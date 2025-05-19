@@ -3,7 +3,7 @@ import os
 import logging
 
 # You can change this path if you want (relative to your working dir)
-PERSIST_FILE = "/Users/athirakm/data/stats.json"
+PERSIST_FILE = "/app/data/stats.json"
 
 _vote_up_count = 0
 _vote_down_count = 0
