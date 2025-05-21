@@ -12,7 +12,7 @@ jobs:
     steps:
     - name: Log in to OpenShift cluster
       run: |
-        oc login --server=${{ secrets.OCP_SERVER }} -u ${{ secrets.OCP_USERNAME }} -p ${{ secrets.OCP_PASSWORD }}
+        oc login --server=${{ secrets.OCP_SERVER }} -u ${{ secrets.OCP_USERNAME }} -p ${{ secrets.OCP_PASSWORD }}  --insecure-skip-tls-verify=true
         if [ $? -eq 0 ]; then
           echo "Logged in successfully!"
         else
