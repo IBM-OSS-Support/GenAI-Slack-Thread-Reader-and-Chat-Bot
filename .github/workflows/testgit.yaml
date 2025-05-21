@@ -1,0 +1,27 @@
+name: Deploy to OpenShift from VM
+
+on:
+  push:
+    branches:
+      - test
+
+jobs:
+  deploy:
+    runs-on: [self-hosted]
+
+    steps:
+    - name: Log in to OpenShift cluster
+      run: |
+        oc login --server=${{ secrets.OCP_SERVER }} -u ${{ secrets.OCP_USERNAME }} -p ${{ secrets.OCP_PASSWORD }}
+        if [ $? -eq 0 ]; then
+          echo "Logged in successfully!"
+        else
+          echo "Login failed!"
+          exit 1
+        fi
+
+    - name: Switch to 'dev' namespace
+      run: oc project dev
+
+    - name: Apply deployment.yaml from VM
+      run: oc apply -f /var/home/core/github/deployment.yaml
