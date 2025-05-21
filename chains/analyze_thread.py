@@ -20,33 +20,32 @@ llm = Ollama(
 default_prompt = PromptTemplate(
     input_variables=["messages"],
     template="""
-You are a Slack assistant. Here’s a thread (with speakers + timestamps):
+You are a Slack assistant. Here’s the full thread (with speakers + timestamps):
 
 {messages}
 
-Produce **exactly** these five sections, using Slack markdown *only*:
+Produce **exactly** these five sections in Slack markdown, and **only** these—stop after Action Items.
 
-*Summary:*  
-• One sentence.  
+*Summary*  
+- One brief sentence summarizing the entire thread.
 
-*Business Impact:*  
-• Bullet on revenue at risk.  
-• Bullet on operational impact.
-• Bullet on customer impact if there is any.
-• Bullet on team impact if there is any.
-• Bullet on other impact if there is any.
-• Bullet on other impact if there is any.  
+*Business Impact*  
+- Revenue at risk (if any).  
+- Operational impact (if any).  
+- Customer impact (if any).  
+- Team impact (if any).  
+- Other impacts (if any).
 
-*Key Points Discussed:*  
-• 3–5 concise bullets.
+*(Only include bullets for impacts explicitly stated in the thread.)*
 
-*Decisions Made:*  
-• Bullets prefixed with who.
+*Key Points Discussed*  
+- 3-5 concise bullets capturing the main discussion points.
 
-*Action Items:*  
-• Bullets prefixed with @username and include due-dates if mentioned.
+*Decisions Made*  
+- Bullets prefixed with who made the decision, e.g. `@username: decision`.
 
-**Don't** add extra headings or paragraphs—stop after the “Action Items” bullets.
+*Action Items*  
+- Bullets prefixed with `@username:`, include due-dates if mentioned.
 """
 )
 
