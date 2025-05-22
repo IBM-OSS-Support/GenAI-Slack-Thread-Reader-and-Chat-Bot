@@ -30,11 +30,11 @@ Produce **exactly** these five sections in Slack markdown, and **only** these—
 - One brief sentence summarizing the entire thread.
 
 *Business Impact*  
-- Revenue at risk (if any).  
-- Operational impact (if any).  
-- Customer impact (if any).  
-- Team impact (if any).  
-- Other impacts (if any).
+- Explain Revenue at risk (if any).  
+- Explain Operational impact (if any).  
+- Explain Customer impact (if any).  
+- Explain Team impact (if any).  
+- Explain Other impacts (if any).
 
 *(Only include bullets for impacts explicitly stated in the thread.)*
 
