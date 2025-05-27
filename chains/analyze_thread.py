@@ -1,11 +1,17 @@
+# chains/analyze_thread.py
+
 import logging
 import time
 import random
 import os
 from datetime import datetime
+
+from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError
 from langchain_community.llms import Ollama
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
+
 from utils.slack_tools import fetch_slack_thread, get_user_name
 
 logger = logging.getLogger(__name__)
@@ -66,36 +72,49 @@ Please follow these instructions exactly and respond in plain text.
 summarizer   = LLMChain(llm=llm, prompt=default_prompt)
 custom_chain = LLMChain(llm=llm, prompt=custom_prompt)
 
-def analyze_slack_thread(channel_id: str, thread_ts: str, instructions: str = None) -> str:
-    # 1) Fetch raw Slack thread messages
-    msgs = fetch_slack_thread(channel_id, thread_ts)
+def analyze_slack_thread(
+    client: WebClient,
+    channel_id: str,
+    thread_ts: str,
+    instructions: str = None,
+) -> str:
+    """
+    Fetch a Slack thread via the provided WebClient, format it,
+    then run the appropriate LLMChain (default or custom).
+    """
+    # 1) Fetch raw messages
+    try:
+        messages = fetch_slack_thread(client, channel_id, thread_ts)
+    except Exception as e:
+        raise RuntimeError(f"Error fetching thread: {e}")
 
-    # 2) Build a "speaker: text" blob, sorted by timestamp
+    # 2) Build timestamped speaker lines
     lines = []
-    for m in sorted(msgs, key=lambda x: float(x.get("ts", 0))):
-        ts_float = float(m.get("ts", 0))
-        ts_human = datetime.fromtimestamp(ts_float).strftime("%Y-%m-%d %H:%M:%S")
-        user_id  = m.get("user") or m.get("bot_id") or "system"
-        # resolve to real username if possible
+    for m in sorted(messages, key=lambda x: float(x.get("ts", 0))):
+        ts = float(m.get("ts", 0))
+        human_ts = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+        uid = m.get("user") or m.get("bot_id") or "system"
         try:
-            speaker = f"@{get_user_name(user_id)}"
-        except Exception:
-            speaker = user_id
+            speaker = f"@{get_user_name(client, uid)}"
+        except:
+            speaker = uid
         text = m.get("text", "").replace("\n", " ")
-        lines.append(f"{ts_human} {speaker}: {text}")
+        lines.append(f"{human_ts} {speaker}: {text}")
 
     blob = "\n".join(lines)
 
-    # 3) Choose chain and run
-    chain_kwargs = {"messages": blob}
-    chain = custom_chain if instructions else summarizer
+    # 3) Select chain & kwargs
     if instructions:
-        chain_kwargs["instructions"] = instructions
+        chain = custom_chain
+        kwargs = {"messages": blob, "instructions": instructions}
+    else:
+        chain = summarizer
+        kwargs = {"messages": blob}
 
-    # 4) Retry once on transient errors
+    # 4) Run with a single retry
     for attempt in range(2):
         try:
-            return chain.run(**chain_kwargs)
+            return chain.run(**kwargs)
         except Exception as e:
             logger.warning(f"Summarization attempt {attempt+1} failed: {e}")
             if attempt == 0:
@@ -104,4 +123,4 @@ def analyze_slack_thread(channel_id: str, thread_ts: str, instructions: str = No
                 logger.exception("Summarization failed after retry")
                 raise
 
-    return "❌ Sorry, I encountered an error and couldn't process your request."
+    return "❌ Sorry, I couldn't process your request."
