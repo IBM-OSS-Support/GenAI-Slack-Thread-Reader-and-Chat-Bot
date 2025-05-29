@@ -7,13 +7,18 @@ import time
 import re
 import sys
 import logging
-
+import io
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from slack_bolt.authorization import AuthorizeResult
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
-
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, ListFlowable, ListItem
+import io
 from utils.slack_api import send_message
 from chains.chat_chain_mcp import process_message_mcp, _get_memory, _memories
 from chains.analyze_thread import analyze_slack_thread
@@ -50,6 +55,7 @@ except ValueError:
     logging.warning("Invalid SESSION_EXPIRATION_SECONDS, defaulting to 600")
     _EXPIRATION_SECONDS = 600
 mins = _EXPIRATION_SECONDS // 60
+
 COMMAND_KEYWORDS = {
     # analyze
     "analyze", "analyse", "dissect", "interpret",
@@ -83,17 +89,37 @@ def load_stats():
             "thumbs_up": d.get("thumbs_up", 0),
             "thumbs_down": d.get("thumbs_down", 0),
             "unique_users": set(range(d.get("unique_user_count", 0))),
+            "total_calls": d.get("total_calls", 0),
+            "analyze_calls": d.get("analyze_calls", 0),
+            "analyze_followups": d.get("analyze_followups", 0),
+            "general_calls": d.get("general_calls", 0),
+            "general_followups": d.get("general_followups", 0),
         }
     except:
-        return {"thumbs_up":0,"thumbs_down":0,"unique_users":set()}
+        return {
+            "thumbs_up": 0,
+            "thumbs_down": 0,
+            "unique_users": set(),
+            "total_calls": 0,
+            "analyze_calls": 0,
+            "analyze_followups": 0,
+            "general_calls": 0,
+            "general_followups": 0,
+        }
+
 def save_stats():
     try:
         os.makedirs(os.path.dirname(STATS_FILE), exist_ok=True)
-        with open(STATS_FILE,"w") as f:
+        with open(STATS_FILE, "w") as f:
             json.dump({
                 "thumbs_up": _vote_up_count,
                 "thumbs_down": _vote_down_count,
                 "unique_user_count": len(_unique_users),
+                "total_calls": USAGE_STATS["total_calls"],
+                "analyze_calls": USAGE_STATS["analyze_calls"],
+                "analyze_followups": USAGE_STATS["analyze_followups"],
+                "general_calls": USAGE_STATS["general_calls"],
+                "general_followups": USAGE_STATS["general_followups"],
             }, f)
     except:
         logging.exception("Failed to save stats")
@@ -108,6 +134,20 @@ _active_sessions = {}
 _command_counts  = {}
 _vote_registry   = {}
 _already_warned  = {}
+
+# —————————————————————————————————————————————
+# Usage Tracking
+# —————————————————————————————————————————————
+USAGE_STATS = {
+    "total_calls": _stats["total_calls"],
+    "analyze_calls": _stats["analyze_calls"],
+    "analyze_followups": _stats["analyze_followups"],
+    "general_calls": _stats["general_calls"],
+    "general_followups": _stats["general_followups"],
+}
+
+# NEW: track which threads began as an analysis
+ANALYSIS_THREADS: set[str] = set()
 
 def get_channel_name(client: WebClient, channel_id: str) -> str:
     try:
@@ -137,7 +177,88 @@ def resolve_user_mentions(client: WebClient, text: str) -> str:
         text,
     )
     return text
+def render_summary_to_pdf(text: str) -> io.BytesIO:
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        rightMargin=40, leftMargin=40,
+        topMargin=40, bottomMargin=40,
+    )
 
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(
+        name='Heading',
+        parent=styles['Heading2'],
+        fontSize=14,
+        leading=18,
+        fontName='Helvetica-Bold'
+    ))
+    styles.add(ParagraphStyle(
+        name='Body',
+        parent=styles['BodyText'],
+        fontSize=10,
+        leading=12
+    ))
+
+    flowables = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+
+        # 1) Detect "*Heading*" at start, possibly with trailing text
+        m = re.match(r'^\*(.+?)\*\s*(.*)$', line)
+        if m:
+            heading = m.group(1).strip()
+            rest    = m.group(2).strip()
+            flowables.append(Paragraph(heading, styles['Heading']))
+            flowables.append(Spacer(1, 6))
+            if rest:
+                flowables.append(Paragraph(rest, styles['Body']))
+                flowables.append(Spacer(1, 6))
+            continue
+
+        # 2) Bullet list item
+        if line.startswith('- '):
+            # collect consecutive bullets into one ListFlowable
+            items = []
+            # note: we only have one line at a time here,
+            # so for simplicity treat each "- " line as its own list
+            item = line[2:].strip()
+            items.append(ListItem(Paragraph(item, styles['Body']), leftIndent=12))
+            flowables.append(ListFlowable(items, bulletType='bullet'))
+            flowables.append(Spacer(1, 6))
+            continue
+
+        # 3) Regular paragraph
+        flowables.append(Paragraph(line, styles['Body']))
+        flowables.append(Spacer(1, 6))
+
+    doc.build(flowables)
+    buffer.seek(0)
+    return buffer
+@app.action("export_pdf")
+def handle_export_pdf(ack, body, client, logger):
+    ack()
+    user_id    = body["user"]["id"]
+    channel_id = body["channel"]["id"]
+    thread_ts  = body["message"]["ts"]
+    summary_md = body["actions"][0]["value"]
+
+    # 1. Convert Slack markdown to plain text:
+    #    remove * around headings, collapse multiple spaces
+    plain = re.sub(r'\r\n?', '\n', summary_md)
+
+    pdf_buffer = render_summary_to_pdf(plain)
+
+    client.files_upload_v2(
+        channels=[channel_id],
+        file=pdf_buffer,
+        filename="summary.pdf",
+        title="Exported Summary",
+        thread_ts=thread_ts
+    )
 @app.action("vote_up")
 def handle_vote_up(ack, body, client):
     ack(); _handle_vote(body, client, "up", "👍")
@@ -175,8 +296,14 @@ def track_usage(uid, thread_ts, cmd=None):
     if len(_unique_users)>before: save_stats()
     if cmd: _command_counts[cmd]=_command_counts.get(cmd,0)+1
 
-def get_bot_stats(): 
-    return f"📊 Stats:\n 👍 {_vote_up_count}\n 👎 {_vote_down_count}"
+def get_bot_stats():
+    return (
+        "📊 *Bot Usage Stats*\n"
+        f"• *Total calls:* {USAGE_STATS['total_calls']}\n"
+        f"• *Analyze calls:* {USAGE_STATS['analyze_calls']} (follow-ups: {USAGE_STATS['analyze_followups']})\n"
+        f"• *General calls:* {USAGE_STATS['general_calls']} (follow-ups: {USAGE_STATS['general_followups']})\n\n"
+        f"👍 *{_vote_up_count}*   👎 *{_vote_down_count}*"
+    )
 
 def process_conversation(client: WebClient, event, text: str):
     ch      = event["channel"]
@@ -199,16 +326,15 @@ def process_conversation(client: WebClient, event, text: str):
         return
 
     # Track usage
-    _last_activity[thread] = now
-    track_usage(uid, thread)
+    is_followup = (thread != ts)
+ 
+    save_stats()
 
     # 1) Strip bot mention
     cleaned = re.sub(r"<@[^>]+>", "", text).strip()
-    # 2) Unwrap Slack’s <https://…|…> URLs
+    # 2) Unwrap URLs
     normalized = re.sub(
-        r"<(https?://[^>|]+)(?:\|[^>]+)?>",
-        r"\1",
-        cleaned
+        r"<(https?://[^>|]+)(?:\|[^>]+)?>", r"\1", cleaned
     ).strip()
 
     logging.debug("🔔 Processing: %s", resolve_user_mentions(client, cleaned).strip())
@@ -234,25 +360,37 @@ def process_conversation(client: WebClient, event, text: str):
             thread_ts=thread, user_id=uid
         )
         return
-
+    USAGE_STATS["total_calls"] += 1
     # Thread analysis
     m = re.search(r"https://[^/]+/archives/([^/]+)/p(\d+)", normalized, re.IGNORECASE)
     if m:
+        # if initial analysis → analyze_calls + track thread
+        if not is_followup:
+            USAGE_STATS["analyze_calls"] += 1
+            ANALYSIS_THREADS.add(thread)
+        else:
+            USAGE_STATS["analyze_followups"] += 1
+        save_stats()
         cid, raw = m.group(1), m.group(2)
-        ts10 = raw[:10] + "." + raw[10:]
-        # Remove the URL itself to get only the leftover instruction
-        cmd = normalized.replace(m.group(0), "").strip().lower()
+        ts10     = raw[:10] + "." + raw[10:]
+        cmd      = normalized.replace(m.group(0), "").strip().lower()
 
         try:
+            export_pdf = False
             if not cmd or cmd in COMMAND_KEYWORDS:
                 summary = analyze_slack_thread(client, cid, ts10)
+                export_pdf = True
             else:
                 summary = analyze_slack_thread(client, cid, ts10, instructions=cmd)
 
             out = resolve_user_mentions(client, summary)
             send_message(
-                client, ch, out,
-                thread_ts=thread, user_id=uid
+                client,
+                ch,
+                out,
+                thread_ts=thread,
+                user_id=uid,
+                export_pdf=export_pdf
             )
             _get_memory(thread).save_context(
                 {"human_input": f"{cmd.upper() or 'ANALYZE'} {ts10}"},
@@ -269,11 +407,22 @@ def process_conversation(client: WebClient, event, text: str):
     # Fallback chat
     reply = process_message_mcp(normalized, thread)
     if reply:
+        # decide follow-up type
+        if not is_followup:
+            USAGE_STATS["general_calls"] += 1
+        else:
+            if thread in ANALYSIS_THREADS:
+                USAGE_STATS["analyze_followups"] += 1
+            else:
+                USAGE_STATS["general_followups"] += 1
+        save_stats()
+
         out = resolve_user_mentions(client, reply)
         send_message(
             client, ch, out,
             thread_ts=thread, user_id=uid
         )
+
 @app.event("message")
 def handle_message_events(event,say,client):
     if event.get("subtype") or event.get("bot_id"): return
