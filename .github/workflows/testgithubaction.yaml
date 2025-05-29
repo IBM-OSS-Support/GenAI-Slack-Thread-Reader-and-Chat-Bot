@@ -24,5 +24,6 @@ jobs:
     - name: Switch to 'dev' namespace
       run: oc project dev
 
+      
     - name: Apply deployment.yaml from VM
       run: oc apply -f /var/home/core/github/deployment.yaml
