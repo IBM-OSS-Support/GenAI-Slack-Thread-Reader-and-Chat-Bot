@@ -16,8 +16,6 @@ jobs:
       IMAGE_NAME: ghcr.io/ibm-oss-support/app:latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
 
       - name: Write CA cert to file
         run: printf '%s' "${{ secrets.OCP_CA_CERT }}" > /tmp/ca.crt
@@ -30,7 +28,9 @@ jobs:
           else
             echo "Login failed!"
             exit 1
-          fi  
+          fi    
+      - name: Checkout code
+        uses: actions/checkout@v3
 
       - name: Log in to GitHub Container Registry with Podman
         run:  echo "${{ secrets.GHCR_PAT }}" | podman login ghcr.io -u ${{ secrets.GHCR_USERNAME }} --password-stdin
