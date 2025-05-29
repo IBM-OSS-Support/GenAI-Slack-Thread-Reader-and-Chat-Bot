@@ -1,0 +1,69 @@
+
+
+name: Build, Push & Deploy to OpenShift
+
+on:
+  push:
+    branches:
+      - test
+      - test1
+
+jobs:
+  deploy:
+    runs-on: [self-hosted]
+
+    env:
+      REGISTRY: ghcr.io
+      IMAGE_NAME: ghcr.io/ibm-oss-support/app:latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Write CA cert to file
+        run: printf '%s' "${{ secrets.OCP_CA_CERT }}" > /tmp/ca.crt
+
+      - name: Log in to OpenShift cluster
+        run: |
+          oc login --server=${{ secrets.OCP_SERVER }} -u ${{ secrets.OCP_USERNAME }} -p ${{ secrets.OCP_PASSWORD }} --certificate-authority=/tmp/ca.crt
+          if [ $? -eq 0 ]; then
+            echo "Logged in successfully!"
+          else
+            echo "Login failed!"
+            exit 1
+          fi  
+
+      - name: Log in to GitHub Container Registry with Podman
+        run:  echo "${{ secrets.GHCR_PAT }}" | podman login ghcr.io -u ${{ secrets.GHCR_USERNAME }} --password-stdin
+
+      - name: Build Docker image with Podman
+        run: |
+          cd /var/home/core/github
+          podman build -t $IMAGE_NAME .  
+
+      - name: Push Docker image with Podman
+        run: podman push $IMAGE_NAME
+
+      - name: Set Namespace Based on Branch
+        id: namespace
+        run: |
+          if [ "${GITHUB_REF#refs/heads/}" == "test" ]; then
+            echo "namespace=dev" >> $GITHUB_OUTPUT
+          elif [ "${GITHUB_REF#refs/heads/}" == "test1" ]; then
+            echo "namespace=test" >> $GITHUB_OUTPUT
+          else
+            echo "namespace=test" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Switch to target namespace
+        run: oc project ${{ steps.namespace.outputs.namespace }}
+
+      
+      - name: Apply Kubernetes manifests
+        run: oc apply -f /var/home/core/github/test.yaml
+
+      - name: Wait for deployment rollout
+        run: |
+          DEPLOYMENT_NAME=$(oc get deployment -n ${{ steps.namespace.outputs.namespace }} -o jsonpath='{.items[0].metadata.name}')
+          oc rollout status deployment/$DEPLOYMENT_NAME -n ${{ steps.namespace.outputs.namespace }}
+
