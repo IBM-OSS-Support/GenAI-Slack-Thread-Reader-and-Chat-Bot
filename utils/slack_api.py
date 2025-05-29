@@ -11,31 +11,27 @@ def send_message(
     channel_id: str,
     text: str,
     thread_ts: str = None,
-    user_id: str = None,            # ← new
+    user_id: str = None,
+    export_pdf: bool = False,   # ← boolean flag
 ) -> None:
-    logging.debug(f"send_message called with channel_id={channel_id}, text={text}, thread_ts={thread_ts}, user_id={user_id}")
-    """
-    Send a message (with 👍/👎 buttons) using the passed-in WebClient.
-    If it's a DM channel, we open (or re-open) the IM first.
-    """
-    # 1) If this looks like an IM channel *or* we have a user_id, ensure the bot can write there
-    if channel_id.startswith("D") and user_id:
-        try:
-            open_resp = client.conversations_open(users=user_id)
-            channel_id = open_resp["channel"]["id"]
-        except SlackApiError as e:
-            logger.error(f"conversations.open failed ({user_id}): {e.response['error']}")
-            return
+    # … your DM‐open logic …
+
+    thumbs = [
+        { "type": "button", "text": {"type":"plain_text","text":"👍"}, "value":"thumbs_up",   "action_id":"vote_up" },
+        { "type": "button", "text": {"type":"plain_text","text":"👎"}, "value":"thumbs_down", "action_id":"vote_down" },
+    ]
+
+    if export_pdf:
+        thumbs.append({
+            "type": "button",
+            "text": {"type": "plain_text", "text": "Export to PDF"},
+            "action_id": "export_pdf",
+            "value": text,
+        })
 
     blocks = [
-        {"type": "section", "text": {"type": "mrkdwn", "text": text}},
-        {
-            "type": "actions",
-            "elements": [
-                {"type": "button", "text": {"type": "plain_text", "text": "👍"}, "value": "thumbs_up", "action_id": "vote_up"},
-                {"type": "button", "text": {"type": "plain_text", "text": "👎"}, "value": "thumbs_down", "action_id": "vote_down"},
-            ],
-        },
+        {"type":"section", "text":{"type":"mrkdwn","text":text}},
+        {"type":"actions", "elements": thumbs},
     ]
     try:
         client.chat_postMessage(

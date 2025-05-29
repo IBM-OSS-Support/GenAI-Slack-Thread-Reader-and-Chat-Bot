@@ -7,13 +7,18 @@ import time
 import re
 import sys
 import logging
-
+import io
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from slack_bolt.authorization import AuthorizeResult
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
-
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, ListFlowable, ListItem
+import io
 from utils.slack_api import send_message
 from chains.chat_chain_mcp import process_message_mcp, _get_memory, _memories
 from chains.analyze_thread import analyze_slack_thread
@@ -172,7 +177,88 @@ def resolve_user_mentions(client: WebClient, text: str) -> str:
         text,
     )
     return text
+def render_summary_to_pdf(text: str) -> io.BytesIO:
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        rightMargin=40, leftMargin=40,
+        topMargin=40, bottomMargin=40,
+    )
 
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(
+        name='Heading',
+        parent=styles['Heading2'],
+        fontSize=14,
+        leading=18,
+        fontName='Helvetica-Bold'
+    ))
+    styles.add(ParagraphStyle(
+        name='Body',
+        parent=styles['BodyText'],
+        fontSize=10,
+        leading=12
+    ))
+
+    flowables = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+
+        # 1) Detect "*Heading*" at start, possibly with trailing text
+        m = re.match(r'^\*(.+?)\*\s*(.*)$', line)
+        if m:
+            heading = m.group(1).strip()
+            rest    = m.group(2).strip()
+            flowables.append(Paragraph(heading, styles['Heading']))
+            flowables.append(Spacer(1, 6))
+            if rest:
+                flowables.append(Paragraph(rest, styles['Body']))
+                flowables.append(Spacer(1, 6))
+            continue
+
+        # 2) Bullet list item
+        if line.startswith('- '):
+            # collect consecutive bullets into one ListFlowable
+            items = []
+            # note: we only have one line at a time here,
+            # so for simplicity treat each "- " line as its own list
+            item = line[2:].strip()
+            items.append(ListItem(Paragraph(item, styles['Body']), leftIndent=12))
+            flowables.append(ListFlowable(items, bulletType='bullet'))
+            flowables.append(Spacer(1, 6))
+            continue
+
+        # 3) Regular paragraph
+        flowables.append(Paragraph(line, styles['Body']))
+        flowables.append(Spacer(1, 6))
+
+    doc.build(flowables)
+    buffer.seek(0)
+    return buffer
+@app.action("export_pdf")
+def handle_export_pdf(ack, body, client, logger):
+    ack()
+    user_id    = body["user"]["id"]
+    channel_id = body["channel"]["id"]
+    thread_ts  = body["message"]["ts"]
+    summary_md = body["actions"][0]["value"]
+
+    # 1. Convert Slack markdown to plain text:
+    #    remove * around headings, collapse multiple spaces
+    plain = re.sub(r'\r\n?', '\n', summary_md)
+
+    pdf_buffer = render_summary_to_pdf(plain)
+
+    client.files_upload_v2(
+        channels=[channel_id],
+        file=pdf_buffer,
+        filename="summary.pdf",
+        title="Exported Summary",
+        thread_ts=thread_ts
+    )
 @app.action("vote_up")
 def handle_vote_up(ack, body, client):
     ack(); _handle_vote(body, client, "up", "👍")
@@ -290,15 +376,21 @@ def process_conversation(client: WebClient, event, text: str):
         cmd      = normalized.replace(m.group(0), "").strip().lower()
 
         try:
+            export_pdf = False
             if not cmd or cmd in COMMAND_KEYWORDS:
                 summary = analyze_slack_thread(client, cid, ts10)
+                export_pdf = True
             else:
                 summary = analyze_slack_thread(client, cid, ts10, instructions=cmd)
 
             out = resolve_user_mentions(client, summary)
             send_message(
-                client, ch, out,
-                thread_ts=thread, user_id=uid
+                client,
+                ch,
+                out,
+                thread_ts=thread,
+                user_id=uid,
+                export_pdf=export_pdf
             )
             _get_memory(thread).save_context(
                 {"human_input": f"{cmd.upper() or 'ANALYZE'} {ts10}"},
