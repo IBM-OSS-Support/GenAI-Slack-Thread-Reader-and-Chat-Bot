@@ -67,7 +67,7 @@ jobs:
 
       - name: Wait for rollout of updated deployments
         run: |
-         NAMESPACE="your-namespace"  # Change this or extract dynamically if needed
+         NAMESPACE="dev"  # Change this or extract dynamically if needed
          for deployment in $(yq e '. | select(.kind == "Deployment") | .metadata.name' ./test.yaml); do
            echo "Waiting for rollout of deployment: $deployment"
            oc rollout status deployment/"$deployment" -n "$NAMESPACE"
