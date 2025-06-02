@@ -1,0 +1,124 @@
+name: Build, Push & Deploy to OpenShift
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  deploy:
+    runs-on: [self-hosted]
+
+    env:
+      REGISTRY: ghcr.io
+      IMAGE_TAG: ${{ github.sha }}
+      IMAGE_NAME: ghcr.io/ibm-oss-support/app:${{ github.sha }}
+
+    steps:
+      - name: Clean workspace
+        run: |
+          echo "Cleaning workspace..."
+          rm -rf * .??* || true
+
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Write CA cert to file
+        run: printf '%s' "${{ secrets.OCP_CA_CERT }}" > /tmp/ca.crt
+
+      - name: Log in to OpenShift cluster
+        run: |
+          oc login --server=${{ secrets.OCP_SERVER }} -u ${{ secrets.OCP_USERNAME }} -p ${{ secrets.OCP_PASSWORD }} --certificate-authority=/tmp/ca.crt
+          if [ $? -eq 0 ]; then
+            echo "Logged in successfully!"
+          else
+            echo "Login failed!"
+            exit 1
+          fi
+
+      - name: Login to Docker Hub
+        run: |
+          echo "${{ secrets.DOCKER_PASSWORD }}" | podman login docker.io -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+
+      - name: Login to GitHub Container Registry
+        run: |
+          echo "${{ secrets.GHCR_PAT }}" | podman login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
+
+      - name: Set config based on branch
+        id: config
+        run: |
+          BRANCH="${GITHUB_REF#refs/heads/}"
+          if [ "$BRANCH" = "dev" ]; then
+            echo "namespace=dev" >> $GITHUB_OUTPUT
+            echo "deploy_path=/var/home/core/oss_bot_dev_deployment" >> $GITHUB_OUTPUT
+          elif [ "$BRANCH" = "main" ]; then
+            echo "namespace=llm" >> $GITHUB_OUTPUT
+            echo "deploy_path=/var/home/core/oss_bot_deployment" >> $GITHUB_OUTPUT
+          else
+            echo "Unknown branch $BRANCH"
+            exit 1
+          fi
+          echo "repo_path=/var/home/core/github" >> $GITHUB_OUTPUT
+
+      - name: Build Docker image with Podman
+        run: |
+          cd ${{ steps.config.outputs.repo_path }}
+          podman build -t $IMAGE_NAME . > /tmp/build.log 2>&1 || {
+            echo "Build failed:"
+            cat /tmp/build.log
+            exit 1
+          }
+
+      - name: Push Docker image with Podman
+        run: |
+          podman push $IMAGE_NAME > /tmp/push.log 2>&1 || {
+            echo "Image push failed:"
+            cat /tmp/push.log
+            exit 1
+          }
+
+      - name: Switch to target namespace
+        run: |
+          oc project ${{ steps.config.outputs.namespace }}
+
+      - name: Validate and apply manifests
+        run: |
+          cd ${{ steps.config.outputs.deploy_path }}
+          for file in *.yaml; do
+            echo "Validating $file"
+            oc apply --dry-run=client -f "$file" >> /tmp/deploy.log 2>&1 || {
+              echo "Validation failed for $file"
+              cat /tmp/deploy.log
+              exit 1
+            }
+            echo "Applying $file"
+            oc apply -f "$file" >> /tmp/deploy.log 2>&1 || {
+              echo "Apply failed for $file"
+              cat /tmp/deploy.log
+              exit 1
+            }
+          done
+
+      - name: Wait for rollout of updated deployments
+        run: |
+          cd ${{ steps.config.outputs.deploy_path }}
+          for deployment in $(yq e '. | select(.kind == "Deployment") | .metadata.name' *.yaml); do
+            echo "Waiting for rollout of deployment: $deployment"
+            oc rollout status deployment/"$deployment" -n ${{ steps.config.outputs.namespace }} >> /tmp/rollout.log 2>&1 || {
+              echo "Rollout failed for $deployment"
+              cat /tmp/rollout.log
+              exit 1
+            }
+          done
+
+      - name: Upload logs (always)
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: build-deploy-logs
+          path: |
+            /tmp/build.log
+            /tmp/push.log
+            /tmp/deploy.log
+            /tmp/rollout.log
