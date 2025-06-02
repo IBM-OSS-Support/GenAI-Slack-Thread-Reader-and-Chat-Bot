@@ -70,10 +70,27 @@ jobs:
             exit 1
           }
 
-      - name: Push Docker image with Podman
+      - name: Tag and push image
         run: |
-          podman push $IMAGE_NAME > /tmp/push.log 2>&1 || {
-            echo "Image push failed:"
+          BRANCH="${GITHUB_REF#refs/heads/}"
+          if [ "$BRANCH" = "dev" ]; then
+            podman tag $IMAGE_NAME ghcr.io/ibm-oss-support/app:dev
+            podman push ghcr.io/ibm-oss-support/app:dev >> /tmp/push.log 2>&1 || {
+              echo "Push failed"
+              cat /tmp/push.log
+              exit 1
+            }    
+          elif [ "$BRANCH" = "main" ]; then
+            podman tag $IMAGE_NAME ghcr.io/ibm-oss-support/app:latest
+            podman push ghcr.io/ibm-oss-support/app:latest >> /tmp/push.log 2>&1 || {
+              echo "Push failed"
+              cat /tmp/push.log
+              exit 1
+            }
+          fi
+
+          podman push $IMAGE_NAME >> /tmp/push.log 2>&1 || {
+            echo "Push SHA failed"
             cat /tmp/push.log
             exit 1
           }
