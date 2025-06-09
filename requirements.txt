@@ -1,6 +1,12 @@
 langchain
 langchain-community
+langchain-ollama
 slack-bolt
+slack-sdk
 python-dotenv
 requests
 reportlab
+PyPDF2
+python-docx
+faiss-cpu
+numpy
