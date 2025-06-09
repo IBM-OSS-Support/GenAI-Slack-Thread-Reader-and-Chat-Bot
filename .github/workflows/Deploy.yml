@@ -48,7 +48,20 @@ jobs:
       - name: Set config based on branch
         id: config
         run: |
-          BRANCH="${GITHUB_REF#refs/heads/}"
+          # Determine branch name from push or PR context
+          if [[ "${GITHUB_REF}" == refs/heads/* ]]; then
+            BRANCH="${GITHUB_REF#refs/heads/}"
+          elif [[ -n "${GITHUB_BASE_REF}" ]]; then
+            BRANCH="${GITHUB_BASE_REF}"
+          elif [[ -n "${GITHUB_HEAD_REF}" ]]; then
+            BRANCH="${GITHUB_HEAD_REF}"
+          else
+            echo "Could not determine branch name"
+            exit 1
+          fi
+
+          echo "Branch: $BRANCH"
+
           if [ "$BRANCH" = "dev" ]; then
             echo "namespace=dev" >> $GITHUB_OUTPUT
             echo "deploy_path=/var/home/core/oss_bot_dev_deployment" >> $GITHUB_OUTPUT
@@ -59,6 +72,7 @@ jobs:
             echo "Unknown branch $BRANCH"
             exit 1
           fi
+
           echo "repo_path=/var/home/core/github" >> $GITHUB_OUTPUT
 
       - name: Build Docker image with Podman
@@ -72,14 +86,25 @@ jobs:
 
       - name: Tag and push image
         run: |
-          BRANCH="${GITHUB_REF#refs/heads/}"
+          # Reuse same branch detection logic here to be consistent
+          if [[ "${GITHUB_REF}" == refs/heads/* ]]; then
+            BRANCH="${GITHUB_REF#refs/heads/}"
+          elif [[ -n "${GITHUB_BASE_REF}" ]]; then
+            BRANCH="${GITHUB_BASE_REF}"
+          elif [[ -n "${GITHUB_HEAD_REF}" ]]; then
+            BRANCH="${GITHUB_HEAD_REF}"
+          else
+            echo "Could not determine branch name"
+            exit 1
+          fi
+
           if [ "$BRANCH" = "dev" ]; then
             podman tag $IMAGE_NAME ghcr.io/ibm-oss-support/app:dev
             podman push ghcr.io/ibm-oss-support/app:dev >> /tmp/push.log 2>&1 || {
               echo "Push failed"
               cat /tmp/push.log
               exit 1
-            }    
+            }
           elif [ "$BRANCH" = "main" ]; then
             podman tag $IMAGE_NAME ghcr.io/ibm-oss-support/app:latest
             podman push ghcr.io/ibm-oss-support/app:latest >> /tmp/push.log 2>&1 || {
