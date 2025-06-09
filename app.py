@@ -3,6 +3,7 @@ load_dotenv()
 
 import json
 import os
+import threading
 import time
 import re
 import sys
@@ -16,8 +17,24 @@ import io
 from utils.slack_api import send_message
 from chains.chat_chain_mcp import process_message_mcp, _get_memory, _memories
 from chains.analyze_thread import analyze_slack_thread
+from utils.channel_rag import analyze_entire_channel, THREAD_VECTOR_STORES
 from utils.slack_tools import get_user_name
 from utils.export_pdf import render_summary_to_pdf
+from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError
+from utils.file_utils import download_slack_file, extract_text_from_file
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.schema import Document
+from utils.vector_store import FaissVectorStore
+from utils.vector_store import FaissVectorStore
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.schema import Document
+logging.basicConfig(level=logging.DEBUG)
+
+# Instantiate a single global vector store
+THREAD_VECTOR_STORES: dict[str, FaissVectorStore] = {}
+if not os.path.exists("data"):
+    os.makedirs("data", exist_ok=True)
 SLACK_APP_TOKEN      = os.getenv("SLACK_APP_TOKEN")
 SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET")
 BOT_USER_ID          = os.getenv("BOT_USER_ID")
@@ -73,6 +90,35 @@ app = App(
 )
 
 STATS_FILE = os.getenv("STATS_FILE", "/data/stats.json")
+def index_in_background(vs: FaissVectorStore, docs: list[Document],
+                        client: WebClient, channel_id: str,
+                        thread_ts: str, user_id: str, filename: str):
+    """
+    Run vs.add_documents(docs) in a separate thread. When done,
+    send a “finished indexing” message into the same thread.
+    """
+    try:
+        # You can optionally log progress inside add_documents itself,
+        # but here we just call it and wait.
+        vs.add_documents(docs)
+
+        # After indexing completes, send the follow-up message:
+        send_message(
+            client,
+            channel_id,
+            f"✅ Finished indexing *{filename}*. What would you like to know?",
+            thread_ts=thread_ts,
+            user_id=user_id
+        )
+    except Exception as e:
+        # If something goes wrong, notify in thread:
+        send_message(
+            client,
+            channel_id,
+            f"❌ Failed to finish indexing *{filename}*: {e}",
+            thread_ts=thread_ts,
+            user_id=user_id
+        )
 def load_stats():
     try:
         with open(STATS_FILE) as f:
@@ -262,7 +308,6 @@ def process_conversation(client: WebClient, event, text: str):
 
     # Track usage
     is_followup = (thread != ts)
- 
     save_stats()
 
     # 1) Strip bot mention
@@ -274,18 +319,19 @@ def process_conversation(client: WebClient, event, text: str):
 
     logging.debug("🔔 Processing: %s", resolve_user_mentions(client, cleaned).strip())
 
+    
     # Help command
     if resolve_user_mentions(client, cleaned).strip() == "":
         send_message(
-        client,
-        ch,
-        ":wave: Hello! Here's how you can use me:\n"
-        "- Paste a Slack thread URL along with a keyword like 'analyze', 'summarize', or 'explain' to get a formatted summary of that thread.\n"
-        "- Or simply mention me and ask any question to start a chat conversation.\n"
-        "- Reply inside a thread to continue the conversation with memory.",
-        thread_ts=thread,
-        user_id=uid,
-    )   
+            client,
+            ch,
+            ":wave: Hello! Here's how you can use me:\n"
+            "- Paste a Slack thread URL along with a keyword like 'analyze', 'summarize', or 'explain' to get a formatted summary of that thread.\n"
+            "- Or simply mention me and ask any question to start a chat conversation.\n"
+            "- Reply inside a thread to continue the conversation with memory.",
+            thread_ts=thread,
+            user_id=uid,
+        )
         return
 
     # Stats command
@@ -295,8 +341,39 @@ def process_conversation(client: WebClient, event, text: str):
             thread_ts=thread, user_id=uid
         )
         return
+
     USAGE_STATS["total_calls"] += 1
+
     # Thread analysis
+    m_ch = re.match(
+    r'^(?:analyze|analyse|summarize|summarise|explain)\s+<?#?([CG][A-Z0-9]+)(?:\|[^>]+)?>?$',
+    normalized,
+    re.IGNORECASE
+)
+    if m_ch:
+        channel_id = m_ch.group(1)
+        USAGE_STATS["analyze_calls"] += 1
+        save_stats()
+
+        try:
+            summary = analyze_entire_channel(client, channel_id, thread)
+            send_message(
+                client,
+                ch,
+                summary,
+                thread_ts=thread,
+                user_id=uid,
+                export_pdf=True
+            )
+        except Exception as e:
+            send_message(
+                client,
+                ch,
+                f"❌ Could not process channel <#{channel_id}>: {e}",
+                thread_ts=thread,
+                user_id=uid
+            )
+        return
     m = re.search(r"https://[^/]+/archives/([^/]+)/p(\d+)", normalized, re.IGNORECASE)
     if m:
         # if initial analysis → analyze_calls + track thread
@@ -339,10 +416,33 @@ def process_conversation(client: WebClient, event, text: str):
             )
         return
 
-    # Fallback chat
-    reply = process_message_mcp(normalized, thread)
+    # ── Fallback chat with RAG lookup ──
+    # 1) Do a vector search only if FAISS index exists
+    final_input = normalized
+    vs = THREAD_VECTOR_STORES.get(thread)
+    if vs and vs.index is not None:
+        try:
+            retrieved_docs = vs.query(normalized, k=3)
+        except Exception:
+            retrieved_docs = []
+
+        if retrieved_docs:
+            rag_lines = []
+            for doc in retrieved_docs:
+                fname = doc.metadata.get("file_name", "unknown")
+                idx   = doc.metadata.get("chunk_index", 0)
+                snippet = doc.page_content.replace("\n", " ")[:300].strip()
+                rag_lines.append(f"File: *{fname}* (chunk {idx})\n```{snippet}...```")
+
+            rag_context = "\n\n".join(rag_lines)
+            final_input = (
+                f"Here are relevant excerpts from the file uploaded in this thread:\n\n"
+                f"{rag_context}\n\nUser: {normalized}"
+            )
+
+    # 2️⃣ Pass the (possibly‐augmented) prompt into your existing chain
+    reply = process_message_mcp(final_input, thread)
     if reply:
-        # decide follow-up type
         if not is_followup:
             USAGE_STATS["general_calls"] += 1
         else:
@@ -357,13 +457,113 @@ def process_conversation(client: WebClient, event, text: str):
             client, ch, out,
             thread_ts=thread, user_id=uid
         )
-
 @app.event("message")
 def handle_message_events(event,say,client):
     if event.get("subtype") or event.get("bot_id"): return
     if event["channel"].startswith("D"):
         process_conversation(client,event,event.get("text","").strip())
+@app.event("file_shared")
+def handle_file_shared(event, client: WebClient, logger):
+    """
+    1) Determine the real ts of the file‐message
+    2) Download & extract text
+    3) Immediately reply “Indexing now…” in that thread
+    4) Spawn a background thread that performs vs.add_documents(...) and,
+       when finished, sends “✅ Finished indexing…” into the same thread.
+    """
 
+    file_id    = event.get("file_id")
+    channel_id = event.get("channel_id")
+    user_id    = event.get("user_id") or event.get("user")
+
+    # 1️⃣ Fetch file_info so we can find the real message ts in "shares"
+    try:
+        resp = client.files_info(file=file_id)
+        file_info = resp["file"]
+    except SlackApiError as e:
+        logger.error(f"files_info failed: {e.response['error']}")
+        return
+
+    shares = file_info.get("shares", {})
+    thread_ts = None
+
+    private_shares = shares.get("private", {})
+    if channel_id in private_shares and private_shares[channel_id]:
+        thread_ts = private_shares[channel_id][0].get("ts")
+    else:
+        public_shares = shares.get("public", {})
+        if channel_id in public_shares and public_shares[channel_id]:
+            thread_ts = public_shares[channel_id][0].get("ts")
+
+    if not thread_ts:
+        thread_ts = event.get("event_ts")
+
+    # 2️⃣ Download & extract text
+    try:
+        local_path = download_slack_file(client, file_info)
+        raw_text   = extract_text_from_file(local_path)
+
+        if not raw_text.strip():
+            send_message(
+                client,
+                channel_id,
+                f"⚠️ I couldn’t extract any text from *{file_info.get('name')}*.",
+                thread_ts=thread_ts,
+                user_id=user_id
+            )
+            return
+
+        # 3️⃣ Build or fetch this thread’s FaissVectorStore
+        if thread_ts not in THREAD_VECTOR_STORES:
+            safe_thread = thread_ts.replace(".", "_")
+            idx_path    = f"data/faiss_{safe_thread}.index"
+            doc_path    = f"data/docstore_{safe_thread}.pkl"
+            THREAD_VECTOR_STORES[thread_ts] = FaissVectorStore(
+                index_path=idx_path,
+                docstore_path=doc_path
+            )
+
+        vs = THREAD_VECTOR_STORES[thread_ts]
+
+        # Split into 1,000-character chunks
+        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        chunks   = splitter.split_text(raw_text)
+
+        docs = []
+        for i, chunk in enumerate(chunks):
+            metadata = {
+                "file_name":   file_info.get("name"),
+                "file_id":     file_id,
+                "chunk_index": i,
+            }
+            docs.append(Document(page_content=chunk, metadata=metadata))
+
+        # 4️⃣ Immediately acknowledge and tell the user we're indexing
+        send_message(
+            client,
+            channel_id,
+            f"⏳ Received *{file_info.get('name')}*. Indexing now (this may take a minute)…",
+            thread_ts=thread_ts,
+            user_id=user_id
+        )
+
+        # 5️⃣ Spawn a background thread to do the heavy work
+        bg_thread = threading.Thread(
+            target=index_in_background,
+            args=(vs, docs, client, channel_id, thread_ts, user_id, file_info.get("name")),
+            daemon=True
+        )
+        bg_thread.start()
+
+    except Exception as e:
+        logger.exception(f"Error processing uploaded file: {e}")
+        send_message(
+            client,
+            channel_id,
+            f"❌ Failed to process *{file_info.get('name')}*: {e}",
+            thread_ts=thread_ts,
+            user_id=user_id
+        )
 @app.event("app_mention")
 def handle_app_mention(event,say,client):
     process_conversation(client,event,event.get("text","").strip())
