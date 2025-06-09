@@ -17,6 +17,7 @@ import io
 from utils.slack_api import send_message
 from chains.chat_chain_mcp import process_message_mcp, _get_memory, _memories
 from chains.analyze_thread import analyze_slack_thread
+from utils.channel_rag import analyze_entire_channel, THREAD_VECTOR_STORES
 from utils.slack_tools import get_user_name
 from utils.export_pdf import render_summary_to_pdf
 from slack_sdk import WebClient
@@ -318,6 +319,7 @@ def process_conversation(client: WebClient, event, text: str):
 
     logging.debug("🔔 Processing: %s", resolve_user_mentions(client, cleaned).strip())
 
+    
     # Help command
     if resolve_user_mentions(client, cleaned).strip() == "":
         send_message(
@@ -343,6 +345,35 @@ def process_conversation(client: WebClient, event, text: str):
     USAGE_STATS["total_calls"] += 1
 
     # Thread analysis
+    m_ch = re.match(
+    r'^(?:analyze|analyse|summarize|summarise|explain)\s+<?#?([CG][A-Z0-9]+)(?:\|[^>]+)?>?$',
+    normalized,
+    re.IGNORECASE
+)
+    if m_ch:
+        channel_id = m_ch.group(1)
+        USAGE_STATS["analyze_calls"] += 1
+        save_stats()
+
+        try:
+            summary = analyze_entire_channel(client, channel_id, thread)
+            send_message(
+                client,
+                ch,
+                summary,
+                thread_ts=thread,
+                user_id=uid,
+                export_pdf=True
+            )
+        except Exception as e:
+            send_message(
+                client,
+                ch,
+                f"❌ Could not process channel <#{channel_id}>: {e}",
+                thread_ts=thread,
+                user_id=uid
+            )
+        return
     m = re.search(r"https://[^/]+/archives/([^/]+)/p(\d+)", normalized, re.IGNORECASE)
     if m:
         # if initial analysis → analyze_calls + track thread
