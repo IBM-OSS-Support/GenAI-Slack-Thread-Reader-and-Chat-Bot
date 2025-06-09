@@ -131,7 +131,7 @@ jobs:
 
       - name: Upload logs (always)
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: build-deploy-logs
           path: |
