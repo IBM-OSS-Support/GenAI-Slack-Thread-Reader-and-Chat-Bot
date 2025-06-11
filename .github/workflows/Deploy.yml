@@ -2,9 +2,9 @@ name: Build, Push & Deploy to OpenShift
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main, dev, Automation]
   pull_request:
-    branches: [main, dev]
+    branches: [main, dev, Automation]
 
 jobs:
   deploy:
@@ -60,12 +60,12 @@ jobs:
 
           echo "Branch detected: $BRANCH"
 
-          if [ "$BRANCH" = "dev" ]; then
+          if [ "$BRANCH" = "Automation" ]; then
             echo "namespace=dev" >> $GITHUB_OUTPUT
-            echo "deploy_path=/var/home/core/oss_bot_dev_deployment" >> $GITHUB_OUTPUT
+            echo "deploy_path=/var/home/core/test" >> $GITHUB_OUTPUT
           elif [ "$BRANCH" = "main" ]; then
             echo "namespace=test" >> $GITHUB_OUTPUT
-            echo "deploy_path=/var/home/core/oss_bot_deployment" >> $GITHUB_OUTPUT
+            echo "deploy_path=/var/home/core/test" >> $GITHUB_OUTPUT
           else
             echo "Unknown branch: $BRANCH"
             exit 1
@@ -96,7 +96,7 @@ jobs:
             exit 1
           fi
 
-          if [ "$BRANCH" = "dev" ]; then
+          if [ "$BRANCH" = "Automation" ]; then
             podman tag $IMAGE_NAME ghcr.io/ibm-oss-support/app:dev
             podman push ghcr.io/ibm-oss-support/app:dev >> /tmp/push.log 2>&1 || {
               echo "Push failed"
