@@ -46,32 +46,32 @@ jobs:
           echo "${{ secrets.GHCR_PAT }}" | podman login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
 
       - name: Set config based on branch
-  id: config
-  run: |
-    # Determine the real source branch
-    if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
-      BRANCH="${GITHUB_HEAD_REF}"
-    elif [[ "${GITHUB_REF}" == refs/heads/* ]]; then
-      BRANCH="${GITHUB_REF#refs/heads/}"
-    else
-      echo "Could not determine branch name"
-      exit 1
-    fi
+        id: config
+        run: |
+          # Determine the real source branch
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            BRANCH="${GITHUB_HEAD_REF}"
+          elif [[ "${GITHUB_REF}" == refs/heads/* ]]; then
+            BRANCH="${GITHUB_REF#refs/heads/}"
+          else
+            echo "Could not determine branch name"
+            exit 1
+          fi
 
-    echo "Branch detected: $BRANCH"
+          echo "Branch detected: $BRANCH"
 
-    if [ "$BRANCH" = "dev" ]; then
-      echo "namespace=dev" >> $GITHUB_OUTPUT
-      echo "deploy_path=/var/home/core/oss_bot_dev_deployment" >> $GITHUB_OUTPUT
-    elif [ "$BRANCH" = "main" ]; then
-      echo "namespace=llm" >> $GITHUB_OUTPUT
-      echo "deploy_path=/var/home/core/oss_bot_deployment" >> $GITHUB_OUTPUT
-    else
-      echo "Unknown branch: $BRANCH"
-      exit 1
-    fi
+          if [ "$BRANCH" = "dev" ]; then
+            echo "namespace=dev" >> $GITHUB_OUTPUT
+            echo "deploy_path=/var/home/core/oss_bot_dev_deployment" >> $GITHUB_OUTPUT
+          elif [ "$BRANCH" = "main" ]; then
+            echo "namespace=test" >> $GITHUB_OUTPUT
+            echo "deploy_path=/var/home/core/oss_bot_deployment" >> $GITHUB_OUTPUT
+          else
+            echo "Unknown branch: $BRANCH"
+            exit 1
+          fi
 
-    echo "repo_path=/var/home/core/github" >> $GITHUB_OUTPUT
+          echo "repo_path=/var/home/core/github" >> $GITHUB_OUTPUT
 
       - name: Build Docker image with Podman
         run: |
