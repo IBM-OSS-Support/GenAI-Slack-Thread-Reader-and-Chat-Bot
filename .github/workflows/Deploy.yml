@@ -32,23 +32,25 @@ jobs:
           DEV_VERSION=$(grep "^version_dev:" version.txt | awk '{print $2}')
 
           if [ "$BRANCH" = "main" ]; then
-          VERSION="$MAIN_VERSION"
+            VERSION="$MAIN_VERSION"
           elif [ "$BRANCH" = "dev" ]; then
-           VERSION="$DEV_VERSION"
-           else
-           echo "No version tagging needed for branch: $BRANCH"
-          echo "skip_deploy=true" >> "$GITHUB_OUTPUT"
-          exit 0
-           fi
+            VERSION="$DEV_VERSION"
+          else
+            echo "No version tagging needed for branch: $BRANCH"
+            echo "skip_deploy=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
-           echo "Using version: $VERSION"
-           echo "tag=$VERSION" >> "$GITHUB_OUTPUT"
-           echo "IMAGE_NAME=${{ env.REGISTRY }}/ibm-oss-support/slack-bot:$VERSION" >> "$GITHUB_ENV"
+          echo "Using version: $VERSION"
+          echo "tag=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "IMAGE_NAME=${{ env.REGISTRY }}/ibm-oss-support/slack-bot:$VERSION" >> "$GITHUB_ENV"
 
       - name: Write CA cert to file
+        if: steps.version.outputs.skip_deploy != 'true'
         run: printf '%s' "${{ secrets.OCP_CA_CERT }}" > /tmp/ca.crt
 
       - name: Log in to OpenShift
+        if: steps.version.outputs.skip_deploy != 'true'
         run: |
           oc login --server=${{ secrets.OCP_SERVER }} \
                    -u ${{ secrets.OCP_USERNAME }} \
@@ -56,12 +58,14 @@ jobs:
                    --certificate-authority=/tmp/ca.crt
 
       - name: Login to registries
+        if: steps.version.outputs.skip_deploy != 'true'
         run: |
           echo "${{ secrets.DOCKER_PASSWORD }}" | podman login docker.io -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
           echo "${{ secrets.GHCR_PAT }}" | podman login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
 
       - name: Set config
         id: config
+        if: steps.version.outputs.skip_deploy != 'true'
         run: |
           BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}"
 
@@ -79,6 +83,7 @@ jobs:
           echo "repo_path=${{ secrets.REPO_PATH }}" >> "$GITHUB_OUTPUT"
 
       - name: Build image
+        if: steps.version.outputs.skip_deploy != 'true'
         run: |
           cd ${{ steps.config.outputs.repo_path }}
           podman build -t $IMAGE_NAME . > /tmp/build.log 2>&1 || {
@@ -88,19 +93,23 @@ jobs:
           }
 
       - name: Push image
+        if: steps.version.outputs.skip_deploy != 'true'
         run: |
           podman push $IMAGE_NAME >> /tmp/push.log 2>&1 || {
             echo "Push failed"
             cat /tmp/push.log
             exit 1
           }
+
       - name: Prepare manifest copy
+        if: steps.version.outputs.skip_deploy != 'true'
         run: |
           rm -rf /tmp/deploy-manifests
           mkdir -p /tmp/deploy-manifests
           cp -r ${{ steps.config.outputs.deploy_path }}/* /tmp/deploy-manifests/
 
       - name: Replace version in manifests and verify
+        if: steps.version.outputs.skip_deploy != 'true'
         run: |
           cd /tmp/deploy-manifests
 
@@ -108,10 +117,12 @@ jobs:
           find . -type f -name '*.yaml' -exec sed -i "s|__VERSION__|${{ steps.version.outputs.tag }}|g" {} +
 
       - name: Switch to namespace
+        if: steps.version.outputs.skip_deploy != 'true'
         run: |
           oc project ${{ steps.config.outputs.namespace }}
 
       - name: Validate manifests
+        if: steps.version.outputs.skip_deploy != 'true'
         run: |
           cd /tmp/deploy-manifests
           for file in *.yaml; do
@@ -124,6 +135,7 @@ jobs:
           done
 
       - name: Apply manifests
+        if: steps.version.outputs.skip_deploy != 'true'
         run: |
           echo "Applying manifests from /tmp/deploy-manifests"
           oc apply -f /tmp/deploy-manifests/ >> /tmp/deploy.log 2>&1 || {
@@ -133,8 +145,9 @@ jobs:
           }
 
       - name: Wait for rollout
+        if: steps.version.outputs.skip_deploy != 'true'
         run: |
-          cd ${{ steps.config.outputs.deploy_path }}
+          cd /tmp/deploy-manifests
           for deployment in $(yq e '. | select(.kind == "Deployment") | .metadata.name' *.yaml); do
             echo "Waiting for rollout: $deployment"
             oc rollout status deployment/"$deployment" -n ${{ steps.config.outputs.namespace }} >> /tmp/rollout.log 2>&1 || {
