@@ -1,2 +1,2 @@
-version_main: 2.0.1
+version_main: 2.0.2
 version_dev: dev
