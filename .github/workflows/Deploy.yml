@@ -94,10 +94,6 @@ jobs:
             cat /tmp/push.log
             exit 1
           }
-      - name: Reset manifests to clean state
-        run: |
-         cd ${{ steps.config.outputs.deploy_path }}
-         git checkout -- .
       
       - name: Prepare manifest copy
         run: |
