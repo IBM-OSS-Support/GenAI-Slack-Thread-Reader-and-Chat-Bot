@@ -43,7 +43,9 @@ TEAM_BOT_TOKENS = {
     os.getenv("TEAM1_ID"): os.getenv("TEAM1_BOT_TOKEN"),
     os.getenv("TEAM2_ID"): os.getenv("TEAM2_BOT_TOKEN"),
 }
-
+formatted = os.getenv("FORMATTED_CHANNELS", "")
+FORMATTED_CHANNELS = {ch.strip() for ch in formatted.split(",") if ch.strip()}
+logging.info(f"Formatted channels: {FORMATTED_CHANNELS}")
 # Ensure all required env vars exist
 for name in (
     "SLACK_APP_TOKEN",
@@ -224,7 +226,11 @@ def handle_export_pdf(ack, body, client, logger):
     user_id    = body["user"]["id"]
     channel_id = body["channel"]["id"]
     thread_ts  = body["message"]["ts"]
-    summary_md = body["actions"][0]["value"]
+    # summary_md = body["message"]["text"]
+    # summary_md = body["actions"][0]["value"]
+    summary_md = body["message"]["blocks"][0]["text"]["text"]
+
+    
 
     # 1. Convert Slack markdown to plain text:
     #    remove * around headings, collapse multiple spaces
@@ -321,7 +327,7 @@ def process_conversation(client: WebClient, event, text: str):
 
     
     # Help command
-    if resolve_user_mentions(client, cleaned).strip() == "":
+    if resolve_user_mentions(client, cleaned).strip() == "" and not event.get("files"):
         send_message(
             client,
             ch,
@@ -346,15 +352,32 @@ def process_conversation(client: WebClient, event, text: str):
 
     # Thread analysis
     m_ch = re.match(
-    r'^(?:analyze|analyse|summarize|summarise|explain)\s+<?#?([CG][A-Z0-9]+)(?:\|[^>]+)?>?$',
-    normalized,
-    re.IGNORECASE
-)
+        r'^(?:analyze|analyse|summarize|summarise|explain)\s+<?#?([A-Za-z0-9_-]+)(?:\|[^>]*)?>?$',
+        normalized,
+        re.IGNORECASE
+    )
     if m_ch:
-        channel_id = m_ch.group(1)
+        raw = m_ch.group(1)
+        # raw could be an ID (starts with C…) or a name
+        if raw.startswith("C") and raw.isupper():
+            channel_id = raw
+        else:
+            # lookup by name
+            resp = client.conversations_list(types="public_channel,private_channel", limit=1000)
+            chans = resp.get("channels", [])
+            match = next((c for c in chans if c["name"] == raw), None)
+            logging.debug(f"Channel match: {match}")
+            if not match:
+                send_message(
+                    client, ch,
+                    f"❌ No channel named *{raw}* found. Use the channel’s real name (without ‘#’).",
+                    thread_ts=thread, user_id=uid
+                )
+                return
+            channel_id = match["id"]
+
         USAGE_STATS["analyze_calls"] += 1
         save_stats()
-
         try:
             summary = analyze_entire_channel(client, channel_id, thread)
             send_message(
@@ -367,11 +390,9 @@ def process_conversation(client: WebClient, event, text: str):
             )
         except Exception as e:
             send_message(
-                client,
-                ch,
+                client, ch,
                 f"❌ Could not process channel <#{channel_id}>: {e}",
-                thread_ts=thread,
-                user_id=uid
+                thread_ts=thread, user_id=uid
             )
         return
     m = re.search(r"https://[^/]+/archives/([^/]+)/p(\d+)", normalized, re.IGNORECASE)
@@ -383,17 +404,20 @@ def process_conversation(client: WebClient, event, text: str):
         else:
             USAGE_STATS["analyze_followups"] += 1
         save_stats()
-        cid, raw = m.group(1), m.group(2)
-        ts10     = raw[:10] + "." + raw[10:]
-        cmd      = normalized.replace(m.group(0), "").strip().lower()
+        cid    = m.group(1)
+        raw    = m.group(2)
+        ts10   = raw[:10] + "." + raw[10:]
+        cmd    = normalized.replace(m.group(0), "").strip().lower()
+        logging.debug(
+            "🔗 Analyzing thread %s in channel %s with command '%s'",ts10,cid,cmd)
 
         try:
             export_pdf = False
-            if not cmd or cmd in COMMAND_KEYWORDS:
-                summary = analyze_slack_thread(client, cid, ts10)
+            if cid in FORMATTED_CHANNELS:
+                summary = analyze_slack_thread(client, cid, ts10,instructions=cmd, default=False)
                 export_pdf = True
             else:
-                summary = analyze_slack_thread(client, cid, ts10, instructions=cmd)
+                summary = analyze_slack_thread(client, cid, ts10, instructions=cmd, default=True)
 
             out = resolve_user_mentions(client, summary)
             send_message(

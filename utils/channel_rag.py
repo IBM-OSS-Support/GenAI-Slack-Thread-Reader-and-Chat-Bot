@@ -1,6 +1,5 @@
-# utils/channel_rag.py
-
 import os
+import re
 from slack_sdk import WebClient
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
@@ -31,14 +30,14 @@ def analyze_entire_channel(
             if m.get("thread_ts") and m["thread_ts"] != ts:
                 continue
 
-            texts = [m.get("text","")]
-            if int(m.get("reply_count",0)) > 0:
+            texts = [m.get("text", "")]
+            if int(m.get("reply_count", 0)) > 0:
                 replies = client.conversations_replies(channel=channel_id, ts=ts, limit=1000)
                 for r in replies.get("messages", [])[1:]:
-                    texts.append(r.get("text",""))
+                    texts.append(r.get("text", ""))
             blocks.append("\n".join(texts))
 
-        cursor = resp.get("response_metadata",{}).get("next_cursor")
+        cursor = resp.get("response_metadata", {}).get("next_cursor")
         if not cursor:
             break
 
@@ -46,6 +45,8 @@ def analyze_entire_channel(
         return f":warning: No messages found in <#{channel_id}>."
 
     raw_all = "\n\n---\n\n".join(blocks)
+    # wrap numeric tokens to preserve exact values
+    raw_all = re.sub(r'(\d+%?)', r'`\1`', raw_all)
 
     # ── chunk & index into FAISS ────────────────────────────────────────────
     vs = THREAD_VECTOR_STORES.get(thread_ts)
@@ -57,13 +58,37 @@ def analyze_entire_channel(
 
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     chunks   = splitter.split_text(raw_all)
-    docs     = [ Document(page_content=chunk, metadata={"channel":channel_id}) for chunk in chunks ]
+    docs     = [ Document(page_content=chunk, metadata={"channel": channel_id}) for chunk in chunks ]
     vs.add_documents(docs)
 
     # ── generate the channel summary ────────────────────────────────────────
-    prompt = (
-        f"You are an assistant. Here is everything from channel <#{channel_id}>:\n\n"
-        f"{raw_all}\n\n"
-        "Please give me a concise, formatted overview of the channel activity."
-    )
+    prompt = f"""
+You are a Slack assistant. Here’s the full channel message details (with speakers + timestamps) of channel <#{channel_id}>:
+
+{raw_all}
+
+**Do not give** dilute or redundant information, just the facts based only on the info provided.
+Copy any numeric values (percentages, counts, dates, times) exactly as they appear in the provided text. Do not convert or exaggerate them.
+Produce **exactly** these five sections in Slack markdown, and **only** these—stop after Action Items.
+*Summary*  
+- One brief sentence summarizing the entire thread.
+
+*Business Impact*  [hide if no impacts are mentioned or relevant]
+- Explain Revenue at risk (if any).  
+- Explain Operational impact (if any).  
+- Explain Customer impact (if any).  
+- Explain Team impact (if any).  
+- Explain Other impacts (if any).
+
+*(Only include bullets for impacts explicitly stated in the thread.)*
+
+*Key Points Discussed*  
+- 3-5 concise bullets capturing the main discussion points.
+
+*Decisions Made*  
+- Bullets prefixed with who made the decision, e.g. `@username: decision`.
+
+*Action Items*  
+- Bullets prefixed with `@username:`, include due-dates if mentioned.
+"""
     return process_message_mcp(prompt, thread_ts)
