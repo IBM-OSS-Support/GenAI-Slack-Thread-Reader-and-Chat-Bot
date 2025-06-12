@@ -110,9 +110,9 @@ jobs:
         run: |
           oc project ${{ steps.config.outputs.namespace }}
 
-      - name: Validate and apply manifests
+      - name: Validate manifests
         run: |
-          cd ${{ steps.config.outputs.deploy_path }}
+          cd /tmp/deploy-manifests
           for file in *.yaml; do
             echo "Validating $file"
             oc apply --dry-run=client -f "$file" >> /tmp/deploy.log 2>&1 || {
@@ -120,13 +120,16 @@ jobs:
               cat /tmp/deploy.log
               exit 1
             }
-            echo "Applying $file"
-            oc apply -f "$file" >> /tmp/deploy.log 2>&1 || {
-              echo "Apply failed: $file"
-              cat /tmp/deploy.log
-              exit 1
-            }
           done
+
+      - name: Apply manifests
+        run: |
+          echo "Applying manifests from /tmp/deploy-manifests"
+          oc apply -f /tmp/deploy-manifests/ >> /tmp/deploy.log 2>&1 || {
+            echo "Apply failed"
+            cat /tmp/deploy.log
+            exit 1
+          }
 
       - name: Wait for rollout
         run: |
