@@ -96,14 +96,14 @@ jobs:
 
           if [ "$BRANCH" = "dev" ]; then
             podman tag $IMAGE_NAME ghcr.io/ibm-oss-support/app:devtest
-            podman push ghcr.io/ibm-oss-support/app:dev >> /tmp/push.log 2>&1 || {
+            podman push ghcr.io/ibm-oss-support/app:devtest >> /tmp/push.log 2>&1 || {
               echo "Push failed"
               cat /tmp/push.log
               exit 1
             }
           elif [ "$BRANCH" = "Automation" ]; then
             podman tag $IMAGE_NAME ghcr.io/ibm-oss-support/app:test
-            podman push ghcr.io/ibm-oss-support/app:latest >> /tmp/push.log 2>&1 || {
+            podman push ghcr.io/ibm-oss-support/app:test >> /tmp/push.log 2>&1 || {
               echo "Push failed"
               cat /tmp/push.log
               exit 1
