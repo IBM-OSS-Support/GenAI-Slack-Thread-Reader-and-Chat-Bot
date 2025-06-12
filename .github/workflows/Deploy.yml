@@ -12,8 +12,6 @@ jobs:
 
     env:
       REGISTRY: ghcr.io
-      IMAGE_TAG: ${{ github.sha }}
-      IMAGE_NAME: ghcr.io/ibm-oss-support/app:${{ github.sha }}
 
     steps:
       - name: Clean workspace
@@ -24,55 +22,62 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v3
 
+      - name: Extract version from version.txt
+        id: version
+        run: |
+          BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}"
+          echo "Branch: $BRANCH"
+
+          MAIN_VERSION=$(grep "^version_main:" version.txt | awk '{print $2}')
+          DEV_VERSION=$(grep "^version_dev:" version.txt | awk '{print $2}')
+
+          if [ "$BRANCH" = "Automation" ]; then
+            VERSION="$MAIN_VERSION"
+          elif [ "$BRANCH" = "dev" ]; then
+            VERSION="$DEV_VERSION"
+          else
+            echo "Unsupported branch: $BRANCH"
+            exit 1
+          fi
+
+          echo "Using version: $VERSION"
+          echo "tag=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "IMAGE_NAME=${{ env.REGISTRY }}/ibm-oss-support/app:$VERSION" >> "$GITHUB_ENV"
+
       - name: Write CA cert to file
         run: printf '%s' "${{ secrets.OCP_CA_CERT }}" > /tmp/ca.crt
 
-      - name: Log in to OpenShift cluster
+      - name: Log in to OpenShift
         run: |
-          oc login --server=${{ secrets.OCP_SERVER }} -u ${{ secrets.OCP_USERNAME }} -p ${{ secrets.OCP_PASSWORD }} --certificate-authority=/tmp/ca.crt
-          if [ $? -eq 0 ]; then
-            echo "Logged in successfully!"
-          else
-            echo "Login failed!"
-            exit 1
-          fi
+          oc login --server=${{ secrets.OCP_SERVER }} \
+                   -u ${{ secrets.OCP_USERNAME }} \
+                   -p ${{ secrets.OCP_PASSWORD }} \
+                   --certificate-authority=/tmp/ca.crt
 
-      - name: Login to Docker Hub
+      - name: Login to registries
         run: |
           echo "${{ secrets.DOCKER_PASSWORD }}" | podman login docker.io -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
-
-      - name: Login to GitHub Container Registry
-        run: |
           echo "${{ secrets.GHCR_PAT }}" | podman login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
 
-      - name: Set config based on branch
+      - name: Set config
         id: config
         run: |
-          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
-            BRANCH="${GITHUB_HEAD_REF}"
-          elif [[ "${GITHUB_REF}" == refs/heads/* ]]; then
-            BRANCH="${GITHUB_REF#refs/heads/}"
-          else
-            echo "Could not determine branch name"
-            exit 1
-          fi
-
-          echo "Branch detected: $BRANCH"
+          BRANCH="${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}"
 
           if [ "$BRANCH" = "dev" ]; then
             echo "namespace=test" >> "$GITHUB_OUTPUT"
             echo "deploy_path=${{ secrets.DEPLOY_PATH_DEV }}" >> "$GITHUB_OUTPUT"
-          elif [ "$BRANCH" = "Automation" ]; then
+          elif [ "$BRANCH" = "Automation" ] || [ "$BRANCH" = "Automation" ]; then
             echo "namespace=test" >> "$GITHUB_OUTPUT"
             echo "deploy_path=${{ secrets.DEPLOY_PATH_MAIN }}" >> "$GITHUB_OUTPUT"
           else
-            echo "Unknown branch: $BRANCH"
+            echo "Unsupported branch: $BRANCH"
             exit 1
           fi
 
           echo "repo_path=${{ secrets.REPO_PATH }}" >> "$GITHUB_OUTPUT"
 
-      - name: Build Docker image with Podman
+      - name: Build image
         run: |
           cd ${{ steps.config.outputs.repo_path }}
           podman build -t $IMAGE_NAME . > /tmp/build.log 2>&1 || {
@@ -81,83 +86,10 @@ jobs:
             exit 1
           }
 
-      - name: Tag and push image
+      - name: Push image
         run: |
-          if [[ "${GITHUB_REF}" == refs/heads/* ]]; then
-            BRANCH="${GITHUB_REF#refs/heads/}"
-          elif [[ -n "${GITHUB_BASE_REF}" ]]; then
-            BRANCH="${GITHUB_BASE_REF}"
-          elif [[ -n "${GITHUB_HEAD_REF}" ]]; then
-            BRANCH="${GITHUB_HEAD_REF}"
-          else
-            echo "Could not determine branch name"
-            exit 1
-          fi
-
-          if [ "$BRANCH" = "dev" ]; then
-            podman tag $IMAGE_NAME ghcr.io/ibm-oss-support/app:devtest
-            podman push ghcr.io/ibm-oss-support/app:devtest >> /tmp/push.log 2>&1 || {
-              echo "Push failed"
-              cat /tmp/push.log
-              exit 1
-            }
-          elif [ "$BRANCH" = "Automation" ]; then
-            podman tag $IMAGE_NAME ghcr.io/ibm-oss-support/app:test
-            podman push ghcr.io/ibm-oss-support/app:test >> /tmp/push.log 2>&1 || {
-              echo "Push failed"
-              cat /tmp/push.log
-              exit 1
-            }
-          fi
-
           podman push $IMAGE_NAME >> /tmp/push.log 2>&1 || {
-            echo "Push SHA failed"
+            echo "Push failed"
             cat /tmp/push.log
             exit 1
           }
-
-      - name: Switch to target namespace
-        run: |
-          oc project ${{ steps.config.outputs.namespace }}
-
-      - name: Validate and apply manifests
-        run: |
-          cd ${{ steps.config.outputs.deploy_path }}
-          for file in *.yaml; do
-            echo "Validating $file"
-            oc apply --dry-run=client -f "$file" >> /tmp/deploy.log 2>&1 || {
-              echo "Validation failed for $file"
-              cat /tmp/deploy.log
-              exit 1
-            }
-            echo "Applying $file"
-            oc apply -f "$file" >> /tmp/deploy.log 2>&1 || {
-              echo "Apply failed for $file"
-              cat /tmp/deploy.log
-              exit 1
-            }
-          done
-
-      - name: Wait for rollout of updated deployments
-        run: |
-          cd ${{ steps.config.outputs.deploy_path }}
-          for deployment in $(yq e '. | select(.kind == "Deployment") | .metadata.name' *.yaml); do
-            echo "Waiting for rollout of deployment: $deployment"
-            oc rollout status deployment/"$deployment" -n ${{ steps.config.outputs.namespace }} >> /tmp/rollout.log 2>&1 || {
-              echo "Rollout failed for $deployment"
-              cat /tmp/rollout.log
-              exit 1
-            }
-          done
-
-      - name: Upload logs (always)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-deploy-logs
-          path: |
-            /tmp/build.log
-            /tmp/push.log
-            /tmp/deploy.log
-            /tmp/rollout.log
-
