@@ -32,17 +32,18 @@ jobs:
           DEV_VERSION=$(grep "^version_dev:" version.txt | awk '{print $2}')
 
           if [ "$BRANCH" = "main" ]; then
-            VERSION="$MAIN_VERSION"
+          VERSION="$MAIN_VERSION"
           elif [ "$BRANCH" = "dev" ]; then
-            VERSION="$DEV_VERSION"
-          else
-            echo "Unsupported branch: $BRANCH"
-            exit 1
-          fi
+           VERSION="$DEV_VERSION"
+           else
+           echo "No version tagging needed for branch: $BRANCH"
+          echo "skip_deploy=true" >> "$GITHUB_OUTPUT"
+          exit 0
+           fi
 
-          echo "Using version: $VERSION"
-          echo "tag=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "IMAGE_NAME=${{ env.REGISTRY }}/ibm-oss-support/slack-bot:$VERSION" >> "$GITHUB_ENV"
+           echo "Using version: $VERSION"
+           echo "tag=$VERSION" >> "$GITHUB_OUTPUT"
+           echo "IMAGE_NAME=${{ env.REGISTRY }}/ibm-oss-support/slack-bot:$VERSION" >> "$GITHUB_ENV"
 
       - name: Write CA cert to file
         run: printf '%s' "${{ secrets.OCP_CA_CERT }}" > /tmp/ca.crt
