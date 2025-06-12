@@ -94,3 +94,7 @@ jobs:
             cat /tmp/push.log
             exit 1
           }
+      - name: Replace version in manifests
+        run: |
+          cd ${{ steps.config.outputs.deploy_path }}
+          find . -type f -name '*.yaml' -exec sed -i "s|__VERSION__|${{ steps.version.outputs.tag }}|g" {} +
