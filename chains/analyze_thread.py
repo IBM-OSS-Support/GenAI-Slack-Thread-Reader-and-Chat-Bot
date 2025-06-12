@@ -80,6 +80,7 @@ def analyze_slack_thread(
     channel_id: str,
     thread_ts: str,
     instructions: str = None,
+    default: bool = True
 ) -> str:
     """
     Fetch a Slack thread via the provided WebClient, format it,
@@ -107,7 +108,7 @@ def analyze_slack_thread(
     blob = "\n".join(lines)
 
     # 3) Select chain & kwargs
-    if instructions:
+    if default:
         chain = custom_chain
         kwargs = {"messages": blob, "instructions": instructions}
     else:

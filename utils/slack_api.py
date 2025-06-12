@@ -1,5 +1,3 @@
-# utils/slack_api.py
-
 import logging
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
@@ -17,8 +15,8 @@ def send_message(
     # … your DM‐open logic …
 
     thumbs = [
-        { "type": "button", "text": {"type":"plain_text","text":"👍"}, "value":"thumbs_up",   "action_id":"vote_up" },
-        { "type": "button", "text": {"type":"plain_text","text":"👎"}, "value":"thumbs_down", "action_id":"vote_down" },
+        {"type": "button", "text": {"type":"plain_text","text":"👍"}, "value":"thumbs_up",   "action_id":"vote_up"},
+        {"type": "button", "text": {"type":"plain_text","text":"👎"}, "value":"thumbs_down", "action_id":"vote_down"},
     ]
 
     if export_pdf:
@@ -26,7 +24,7 @@ def send_message(
             "type": "button",
             "text": {"type": "plain_text", "text": "Export to PDF"},
             "action_id": "export_pdf",
-            "value": text,
+            "value": "export_pdf",       # ← short, fixed identifier
         })
 
     blocks = [
@@ -34,13 +32,14 @@ def send_message(
         {"type":"actions", "elements": thumbs},
     ]
     try:
-        client.chat_postMessage(
+        response = client.chat_postMessage(
             channel=channel_id,
             text=text,    # fallback text
             blocks=blocks,
             thread_ts=thread_ts,
         )
         logger.info(f"Message sent to {channel_id} (thread {thread_ts or 'new'})")
+        return response
     except SlackApiError as e:
         logger.error(f"Failed to send Slack message: {e.response['error']}")
     except Exception:
