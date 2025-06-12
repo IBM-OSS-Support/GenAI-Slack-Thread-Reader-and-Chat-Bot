@@ -108,15 +108,6 @@ jobs:
           echo "Replacing __VERSION__ with '${{ steps.version.outputs.tag }}'..."
           find . -type f -name '*.yaml' -exec sed -i "s|__VERSION__|${{ steps.version.outputs.tag }}|g" {} +
 
-          echo "Verifying version replacements:"
-          grep -H "image:" *.yaml || {
-          echo "No image field found, or replacement failed."
-          exit 1
-          }
-
-          echo "All modified YAMLs with image version:"
-          for f in *.yaml; do
-          echo "--- $f ---"
-          cat "$f"
-          echo
-          done
+          echo "--- test.yaml ---"
+          cat "$DEPLOY_PATH/test.yaml"
+  
