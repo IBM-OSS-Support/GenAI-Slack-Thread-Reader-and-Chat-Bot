@@ -78,7 +78,7 @@ jobs:
 
       - name: Build image
         run: |
-          cd ${{ steps.config.outputs.repo_path }}
+          cd $GITHUB_WORKSPACE
           podman build -t $IMAGE_NAME . > /tmp/build.log 2>&1 || {
             echo "Build failed:"
             cat /tmp/build.log
