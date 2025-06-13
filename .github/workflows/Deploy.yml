@@ -130,17 +130,17 @@ jobs:
             exit 1
           }
 
-      - name: Wait for rollout
+      - name: Restart and wait for rollout
         run: |
-          cd ${{ steps.config.outputs.deploy_path }}
-          for deployment in $(yq e '. | select(.kind == "Deployment") | .metadata.name' *.yaml); do
-            echo "Waiting for rollout: $deployment"
-            oc rollout status deployment/"$deployment" -n ${{ steps.config.outputs.namespace }} >> /tmp/rollout.log 2>&1 || {
-              echo "Rollout failed: $deployment"
-              cat /tmp/rollout.log
-              exit 1
-            }
-          done
+          echo "Restarting deployment: slack-bot"
+          oc rollout restart deployment/slack-bot -n ${{ steps.config.outputs.namespace }}
+
+          echo "Waiting for rollout to complete..."
+          oc rollout status deployment/slack-bot -n ${{ steps.config.outputs.namespace }} >> /tmp/rollout.log 2>&1 || {
+          echo "Rollout failed: slack-bot"
+          cat /tmp/rollout.log
+          exit 1
+          }
 
       - name: Upload logs (always)
         if: always()
