@@ -63,17 +63,29 @@ def analyze_entire_channel(
 
     # ── generate the channel summary ────────────────────────────────────────
     prompt = f"""
-You are a Slack assistant. Here’s the full channel message details (with speakers + timestamps) of channel <#{channel_id}>:
+You are a Slack assistant. You are given a Slack thread or channel log in `{raw_all}` format, including user messages with timestamps.
 
-{raw_all}
+Your job is to summarize the discussion with *zero assumptions*. Follow these exact rules:
+Your entire response should be below 3000 chars and it should keep the alignment and spacing.
+1. **If the discussion lacks substance** (e.g. messages are too short, unrelated, non-technical, vague, or just status pings), then say clearly:
 
-**Do not give** dilute or redundant information, just the facts based only on the info provided.
-Copy any numeric values (percentages, counts, dates, times) exactly as they appear in the provided text. Do not convert or exaggerate them.
-Produce **exactly** these five sections in Slack markdown, and **only** these—stop after Action Items.
+> Summary  
+> The provided discussion contains insufficient detail to generate a meaningful summary.
+
+> Key Points Discussed  
+> - No key discussion points available.
+
+> Decisions Made  
+> - None.
+
+> Action Items  
+> - None.
+
+2. **If there are meaningful discussions**, produce **only** the following five sections in Slack markdown:
 *Summary*  
 - One brief sentence summarizing the entire thread.
 
-*Business Impact*  [hide if no impacts are mentioned or relevant]
+*Business Impact*  
 - Explain Revenue at risk (if any).  
 - Explain Operational impact (if any).  
 - Explain Customer impact (if any).  
@@ -90,5 +102,12 @@ Produce **exactly** these five sections in Slack markdown, and **only** these—
 
 *Action Items*  
 - Bullets prefixed with `@username:`, include due-dates if mentioned.
+
+3. **NEVER infer or imagine content** that isn’t explicitly stated in `{raw_all}`. Do not convert vague hints into conclusions. Do not create example structures.
+
+4. **Copy all numeric values (dates, times, percentages, counts) exactly** as in `{raw_all}`. Do not paraphrase them.
+
+5. **Do not add explanation, context, suggestions, or markdown outside of the five sections.**
+
 """
     return process_message_mcp(prompt, thread_ts)
