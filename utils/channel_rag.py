@@ -67,25 +67,12 @@ You are a Slack assistant. You are given a Slack thread or channel log in `{raw_
 
 Your job is to summarize the discussion with *zero assumptions*. Follow these exact rules:
 Your entire response should be below 3000 chars and it should keep the alignment and spacing.
-1. **If the discussion lacks substance** (e.g. messages are too short, unrelated, non-technical, vague, or just status pings), then say clearly:
-
-> Summary  
-> The provided discussion contains insufficient detail to generate a meaningful summary.
-
-> Key Points Discussed  
-> - No key discussion points available.
-
-> Decisions Made  
-> - None.
-
-> Action Items  
-> - None.
-
-2. **If there are meaningful discussions**, produce **only** the following five sections in Slack markdown:
-*Summary*  
+**If the discussion lacks substance** (e.g. messages are too short, unrelated, non-technical, vague, or just status pings), then say clearly:
+**If there are meaningful discussions**, produce **only** the following five sections in Slack markdown:
+1. *Summary*  
 - One brief sentence summarizing the entire thread.
 
-*Business Impact*  
+2. *Business Impact*  
 - Explain Revenue at risk (if any).  
 - Explain Operational impact (if any).  
 - Explain Customer impact (if any).  
@@ -94,20 +81,20 @@ Your entire response should be below 3000 chars and it should keep the alignment
 
 *(Only include bullets for impacts explicitly stated in the thread.)*
 
-*Key Points Discussed*  
+3. *Key Points Discussed*  
 - 3-5 concise bullets capturing the main discussion points.
 
-*Decisions Made*  
+4. *Decisions Made*  
 - Bullets prefixed with who made the decision, e.g. `@username: decision`.
 
-*Action Items*  
+5. *Action Items*  
 - Bullets prefixed with `@username:`, include due-dates if mentioned.
 
-3. **NEVER infer or imagine content** that isn’t explicitly stated in `{raw_all}`. Do not convert vague hints into conclusions. Do not create example structures.
+**NEVER infer or imagine content** that isn’t explicitly stated in `{raw_all}`. Do not convert vague hints into conclusions. Do not create example structures.
 
-4. **Copy all numeric values (dates, times, percentages, counts) exactly** as in `{raw_all}`. Do not paraphrase them.
+ **Copy all numeric values (dates, times, percentages, counts) exactly** as in `{raw_all}`. Do not paraphrase them.
 
-5. **Do not add explanation, context, suggestions, or markdown outside of the five sections.**
+ **Do not add explanation, context, suggestions, or markdown outside of the five sections.**
 
 """
     return process_message_mcp(prompt, thread_ts)

@@ -13,7 +13,8 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
 # Initialize local Granite model
 llm = Ollama(
     model="granite3.3:8b",
-    base_url=OLLAMA_BASE_URL
+    base_url=OLLAMA_BASE_URL,
+    temperature=0.0,
 )
 
 prompt = PromptTemplate(
