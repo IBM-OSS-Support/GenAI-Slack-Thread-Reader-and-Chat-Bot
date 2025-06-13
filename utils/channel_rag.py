@@ -23,14 +23,16 @@ llm = Ollama(
 channel_prompt = PromptTemplate(
     input_variables=["messages"],
     template="""
-You are a Slack assistant. You are given a Slack thread or channel log in `{messages}` format, including user messages with timestamps.
+You are a Slack assistant. Here’s the full thread (with speakers + timestamps):
 
-Your job is to summarize the discussion with *zero assumptions*. Follow these exact rules:
+{messages}
 
-**Summary*  
+Produce **exactly** these five sections in Slack markdown, and **only** these—stop after Action Items.
+
+*Summary*  
 - One brief sentence summarizing the entire thread.
 
-**Business Impact**  
+*Business Impact*  
 - Explain Revenue at risk (if any).  
 - Explain Operational impact (if any).  
 - Explain Customer impact (if any).  
@@ -39,24 +41,14 @@ Your job is to summarize the discussion with *zero assumptions*. Follow these ex
 
 *(Only include bullets for impacts explicitly stated in the thread.)*
 
-**Key Points Discussed**  
+*Key Points Discussed*  
 - 3-5 concise bullets capturing the main discussion points.
 
-**Decisions Made**  
+*Decisions Made*  
 - Bullets prefixed with who made the decision, e.g. `@username: decision`.
 
-**Action Items**  
+*Action Items*  
 - Bullets prefixed with `@username:`, include due-dates if mentioned.
-
-Your entire response should be below 3000 chars and it should keep the alignment and spacing.  
-**If the discussion lacks substance** (e.g. messages are too short, unrelated, non-technical, vague, or just status pings), then say clearly:  
-**If there are meaningful discussions**, produce **only** the above five sections in Slack markdown.
-
-**NEVER infer or imagine content** that isn’t explicitly stated in `{messages}`. Do not convert vague hints into conclusions. Do not create example structures.
-
-**Copy all numeric values (dates, times, percentages, counts) exactly** as in `{messages}`. Do not paraphrase them.
-
-**Do not add explanation, context, suggestions, or markdown outside of the five sections.**
 """
 )
 
