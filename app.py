@@ -481,116 +481,111 @@ def process_conversation(client: WebClient, event, text: str):
             client, ch, out,
             thread_ts=thread, user_id=uid
         )
-@app.event("message")
-def handle_message_events(event,say,client):
-    if event.get("subtype") or event.get("bot_id"): return
-    if event["channel"].startswith("D"):
-        process_conversation(client,event,event.get("text","").strip())
-@app.event("file_shared")
-def handle_file_shared(event, client: WebClient, logger):
-    """
-    1) Determine the real ts of the file‐message
-    2) Download & extract text
-    3) Immediately reply “Indexing now…” in that thread
-    4) Spawn a background thread that performs vs.add_documents(...) and,
-       when finished, sends “✅ Finished indexing…” into the same thread.
-    """
+@app.event({"type": "message", "subtype": "file_share"})
+def handle_file_share(event, client: WebClient, logger):
+    files = event.get("files", [])
+    if not files:
+        return
+    file_obj   = files[0]
+    file_id    = file_obj["id"]
+    channel_id = event["channel"]
+    user_id    = event.get("user")
+    file_name  = file_obj.get("name", "")
+    supported = {"pdf", "docx", "doc", "txt", "md", "csv", "py"}
+    ext = file_name.rsplit(".", 1)[-1].lower()
+    thread_ts = event.get("thread_ts") or event.get("ts")
 
-    file_id    = event.get("file_id")
-    channel_id = event.get("channel_id")
-    user_id    = event.get("user_id") or event.get("user")
+    # 1️⃣ Check against supported extensions
+    supported = {"pdf", "docx", "doc", "txt", "md", "csv", "py"}
+    ext = file_name.rsplit(".", 1)[-1].lower()
+    if ext not in supported:
+        send_message(
+            client,
+            channel_id,
+            (
+            f"⚠️ Oops—I can’t handle *.{ext}* files yet. "
+            "Right now I only support:\n"
+            "• PDF (.pdf)\n"
+            "• Word documents (.docx, .doc)\n"
+            "• Plain-text & Markdown (.txt, .md)\n"
+            "• CSV files (.csv)\n"
+            "• Python scripts (.py)"
+        ),
+            thread_ts=thread_ts,
+            user_id=user_id
+        )
+        return
 
-    # 1️⃣ Fetch file_info so we can find the real message ts in "shares"
     try:
-        resp = client.files_info(file=file_id)
+        resp      = client.files_info(file=file_id)
         file_info = resp["file"]
     except SlackApiError as e:
         logger.error(f"files_info failed: {e.response['error']}")
         return
-
-    shares = file_info.get("shares", {})
-    thread_ts = None
-
-    private_shares = shares.get("private", {})
-    if channel_id in private_shares and private_shares[channel_id]:
-        thread_ts = private_shares[channel_id][0].get("ts")
-    else:
-        public_shares = shares.get("public", {})
-        if channel_id in public_shares and public_shares[channel_id]:
-            thread_ts = public_shares[channel_id][0].get("ts")
-
-    if not thread_ts:
-        thread_ts = event.get("event_ts")
-
-    # 2️⃣ Download & extract text
+    
+    local_path = None
     try:
         local_path = download_slack_file(client, file_info)
         raw_text   = extract_text_from_file(local_path)
-
-        if not raw_text.strip():
-            send_message(
-                client,
-                channel_id,
-                f"⚠️ I couldn’t extract any text from *{file_info.get('name')}*.",
-                thread_ts=thread_ts,
-                user_id=user_id
-            )
-            return
-
-        # 3️⃣ Build or fetch this thread’s FaissVectorStore
-        if thread_ts not in THREAD_VECTOR_STORES:
-            safe_thread = thread_ts.replace(".", "_")
-            idx_path    = f"data/faiss_{safe_thread}.index"
-            doc_path    = f"data/docstore_{safe_thread}.pkl"
-            THREAD_VECTOR_STORES[thread_ts] = FaissVectorStore(
-                index_path=idx_path,
-                docstore_path=doc_path
-            )
-
-        vs = THREAD_VECTOR_STORES[thread_ts]
-
-        # Split into 1,000-character chunks
-        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-        chunks   = splitter.split_text(raw_text)
-
-        docs = []
-        for i, chunk in enumerate(chunks):
-            metadata = {
-                "file_name":   file_info.get("name"),
-                "file_id":     file_id,
-                "chunk_index": i,
-            }
-            docs.append(Document(page_content=chunk, metadata=metadata))
-
-        # 4️⃣ Immediately acknowledge and tell the user we're indexing
-        send_message(
-            client,
-            channel_id,
-            f"⏳ Received *{file_info.get('name')}*. Indexing now (this may take a minute)…",
-            thread_ts=thread_ts,
-            user_id=user_id
-        )
-
-        # 5️⃣ Spawn a background thread to do the heavy work
-        bg_thread = threading.Thread(
-            target=index_in_background,
-            args=(vs, docs, client, channel_id, thread_ts, user_id, file_info.get("name")),
-            daemon=True
-        )
-        bg_thread.start()
-
     except Exception as e:
-        logger.exception(f"Error processing uploaded file: {e}")
-        send_message(
-            client,
-            channel_id,
-            f"❌ Failed to process *{file_info.get('name')}*: {e}",
-            thread_ts=thread_ts,
-            user_id=user_id
+        logger.exception(f"Error retrieving file {file_id}: {e}")
+        send_message(client, channel_id, f"❌ Failed to download *{file_info.get('name')}*: {e}", thread_ts=event.get("ts"), user_id=user_id)
+        return
+
+    if not raw_text.strip():
+        send_message(client, channel_id, f"⚠️ I couldn’t extract any text from *{file_info.get('name')}*.", thread_ts=event.get("ts"), user_id=user_id)
+        return
+
+    thread_ts = event.get("thread_ts") or event["ts"]
+    if thread_ts not in THREAD_VECTOR_STORES:
+        safe_thread = thread_ts.replace(".", "_")
+        THREAD_VECTOR_STORES[thread_ts] = FaissVectorStore(
+            index_path=f"data/faiss_{safe_thread}.index", docstore_path=f"data/docstore_{safe_thread}.pkl"
         )
+    vs = THREAD_VECTOR_STORES[thread_ts]
+
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    chunks   = splitter.split_text(raw_text)
+    docs     = [Document(page_content=chunk, metadata={"file_name": file_info.get("name"),"file_id": file_id,"chunk_index": i}) for i, chunk in enumerate(chunks)]
+
+    send_message(client, channel_id, f"⏳ Received *{file_info.get('name')}*. Indexing now…", thread_ts=thread_ts, user_id=user_id)
+    threading.Thread(target=index_in_background, args=(vs, docs, client, channel_id, thread_ts, user_id, file_info.get("name")), daemon=True).start()
+
+# App mention handler: handles mentions and routes file uploads if present
+@app.event("message")
+def handle_direct_message(event, client: WebClient, logger):
+    # ignore messages with subtypes (e.g. file_share, bot_message, etc.)
+    if event.get("subtype"):
+        return
+
+    # only handle IM (direct message) channels
+    if event.get("channel_type") != "im":
+        return
+
+    # now your normal chat flow
+    text       = event.get("text", "").strip()
+    channel_id = event["channel"]
+    user_id    = event["user"]
+    thread_ts  = event.get("ts")
+
+    # if you want the “help on empty text” behavior:
+    if not text:
+        send_message(
+            client, channel_id,
+            ":wave: Hi there! Just mention me in a channel or ask me something right here.",
+            thread_ts=thread_ts, user_id=user_id
+        )
+        return
+
+    # hand off to your RAG/chat engine exactly as you do in handle_app_mention
+    process_conversation(client, event, text)
 @app.event("app_mention")
-def handle_app_mention(event,say,client):
-    process_conversation(client,event,event.get("text","").strip())
+def handle_app_mention(event, say, client, logger):
+    # If a file is attached during the mention, treat it as file_share
+    if event.get("files"):
+        return handle_file_share(event, client, logger)
+    # Otherwise, normal conversation
+    process_conversation(client, event, event.get("text", "").strip())
 
 if __name__=="__main__":
     SocketModeHandler(app,SLACK_APP_TOKEN).start()
