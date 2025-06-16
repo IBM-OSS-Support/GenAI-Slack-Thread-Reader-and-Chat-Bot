@@ -65,6 +65,9 @@ def analyze_entire_channel(
     3) Ask your Granite LLM for a channel summary.
     """
     # ── fetch every top‐level message + replies ───────────────────────────────
+    def safe_number_wrap(text):
+    # Avoid wrapping digits inside user mentions like <@U08PN8WJRAA>
+        return re.sub(r'(?<!<@U)(\d+%?)(?!>)', r'`\1`', text)
     cursor = None
     blocks = []
     while True:
@@ -101,7 +104,7 @@ def analyze_entire_channel(
 
     # combine all blocks and escape percentages/digits
     raw_all = "\n\n---\n\n".join(blocks)
-    raw_all = re.sub(r"(\d+%?)", r"`\1`", raw_all)
+    # raw_all = re.sub(r"(\d+%?)", r"`\1`", raw_all)
 
     # ── chunk & index into FAISS ─────────────────────────────────────────────
     vs = THREAD_VECTOR_STORES.get(thread_ts)
