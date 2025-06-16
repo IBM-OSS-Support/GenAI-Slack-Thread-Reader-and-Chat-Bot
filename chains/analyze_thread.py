@@ -12,8 +12,12 @@ from langchain_community.llms import Ollama
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
 
+from chains.chat_chain_mcp import process_message_mcp
 from utils.slack_tools import fetch_slack_thread, get_user_name
-
+from slack_sdk import WebClient
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.schema import Document
+from utils.vector_store import FaissVectorStore
 logger = logging.getLogger(__name__)
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
 
@@ -71,12 +75,12 @@ Please follow these instructions exactly and respond in plain text.
 
 summarizer   = LLMChain(llm=llm, prompt=default_prompt)
 custom_chain = LLMChain(llm=llm, prompt=custom_prompt)
-
 def analyze_slack_thread(
     client: WebClient,
     channel_id: str,
     thread_ts: str,
     instructions: str = None,
+    default: bool = True
 ) -> str:
     """
     Fetch a Slack thread via the provided WebClient, format it,
@@ -104,7 +108,7 @@ def analyze_slack_thread(
     blob = "\n".join(lines)
 
     # 3) Select chain & kwargs
-    if instructions:
+    if default:
         chain = custom_chain
         kwargs = {"messages": blob, "instructions": instructions}
     else:

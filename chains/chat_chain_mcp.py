@@ -1,4 +1,5 @@
 import logging
+import re
 import os
 from langchain_community.llms import Ollama
 from langchain.prompts import PromptTemplate
@@ -6,11 +7,14 @@ from langchain.chains import LLMChain
 from langchain.memory import ConversationBufferMemory
 
 logger = logging.getLogger(__name__)
+_TOKEN_RE = re.compile(r"<\|im_start\|>|\<\|im_sep\|>")
+
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
 # Initialize local Granite model
 llm = Ollama(
     model="granite3.3:8b",
-    base_url=OLLAMA_BASE_URL
+    base_url=OLLAMA_BASE_URL,
+    temperature=0.0,
 )
 
 prompt = PromptTemplate(
@@ -36,8 +40,15 @@ def _get_memory(thread_ts: str) -> ConversationBufferMemory:
     return _memories[thread_ts]
 
 def process_message_mcp(human_input: str, thread_ts: str = "global") -> str:
+    # pull in memory
     memory = _get_memory(thread_ts)
-    chat_history = memory.load_memory_variables({}).get("chat_history", "")
+    vars = memory.load_memory_variables({})
+    chat_history = vars.get("chat_history", "")
+
+    # sanitize both history and incoming prompt
+    human_input   = _TOKEN_RE.sub("", human_input)
+    chat_history  = _TOKEN_RE.sub("", chat_history)
+
     try:
         chain = LLMChain(llm=llm, prompt=prompt, memory=memory)
         reply = chain.run(chat_history=chat_history, human_input=human_input)
