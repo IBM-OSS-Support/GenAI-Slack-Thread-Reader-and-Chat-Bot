@@ -66,7 +66,8 @@ except ValueError:
     logging.warning("Invalid SESSION_EXPIRATION_SECONDS, defaulting to 600")
     _EXPIRATION_SECONDS = 600
 mins = _EXPIRATION_SECONDS // 60
-
+DEFAULT_TEAM_ID = next(iter(TEAM_BOT_TOKENS))
+PLACEHOLDER_TOKEN = TEAM_BOT_TOKENS[DEFAULT_TEAM_ID]
 COMMAND_KEYWORDS = {
     # analyze
     "analyze", "analyse", "dissect", "interpret",
@@ -87,18 +88,28 @@ def custom_authorize(enterprise_id: str, team_id: str, logger):
     )
 
 app = App(
+    token=PLACEHOLDER_TOKEN,          # ← placeholder to satisfy Bolt
     signing_secret=SLACK_SIGNING_SECRET,
-    authorize=custom_authorize,
+    authorize=custom_authorize,       # ← still do per-event auth here
 )
+
+def get_client_for_team(team_id: str) -> WebClient:
+    bot_token = TEAM_BOT_TOKENS.get(team_id)
+    logging.debug(f"Getting client for team {team_id!r} with token {bot_token!r}")
+    if not bot_token:
+        raise RuntimeError(f"No token for team {team_id!r}")
+    return WebClient(token=bot_token)
 
 STATS_FILE = os.getenv("STATS_FILE", "/data/stats.json")
 def index_in_background(vs: FaissVectorStore, docs: list[Document],
                         client: WebClient, channel_id: str,
-                        thread_ts: str, user_id: str, filename: str):
+                        thread_ts: str, user_id: str, filename: str,real_team: str):
     """
     Run vs.add_documents(docs) in a separate thread. When done,
     send a “finished indexing” message into the same thread.
     """
+    # 2) rebind your client
+    client = get_client_for_team(real_team)
     try:
         # You can optionally log progress inside add_documents itself,
         # but here we just call it and wait.
@@ -391,7 +402,15 @@ def process_conversation(client: WebClient, event, text: str):
         except Exception as e:
             send_message(
                 client, ch,
-                f"❌ Could not process channel <#{channel_id}>: {e}",
+                (
+        f"❌ *Failed to process channel* `{channel_id}`:\n"
+        f">\n\n"
+        "*🛠️ How to troubleshoot:*\n\n"
+        " 🔍 Make sure you’re in the *same workspace* as the channel you’re targeting.\n\n"
+        " 📨 If you’re DM’ing the bot, double-check you’ve selected the *correct workspace* from the app’s top menu.\n\n"
+        " 🆔 Confirm the channel ID or name is *accurate* and the bot has been *invited*.\n\n"
+        "If you still run into issues, please review your app configuration or contact your workspace admin."
+    ),
                 thread_ts=thread, user_id=uid
             )
         return
@@ -482,7 +501,15 @@ def process_conversation(client: WebClient, event, text: str):
             thread_ts=thread, user_id=uid
         )
 @app.event({"type": "message", "subtype": "file_share"})
-def handle_file_share(event, client: WebClient, logger):
+def handle_file_share(body,event, client: WebClient, logger):
+    real_team = (
+        body.get("team_id")
+        # fallback if you’re using authorizations array:
+        or (body.get("authorizations") or [{}])[0].get("team_id")
+    )
+    logging.debug(f"Handling file share for team {real_team!r}")
+    # 2) rebind your client
+    client = get_client_for_team(real_team)
     files = event.get("files", [])
     if not files:
         return
@@ -549,11 +576,18 @@ def handle_file_share(event, client: WebClient, logger):
     docs     = [Document(page_content=chunk, metadata={"file_name": file_info.get("name"),"file_id": file_id,"chunk_index": i}) for i, chunk in enumerate(chunks)]
 
     send_message(client, channel_id, f"⏳ Received *{file_info.get('name')}*. Indexing now…", thread_ts=thread_ts, user_id=user_id)
-    threading.Thread(target=index_in_background, args=(vs, docs, client, channel_id, thread_ts, user_id, file_info.get("name")), daemon=True).start()
+    logging.debug("d jdnjdnjdnjdnjkdn   %s",real_team)
+    threading.Thread(target=index_in_background, args=(vs, docs, client, channel_id, thread_ts, user_id, file_info.get("name"),real_team), daemon=True).start()
 
 # App mention handler: handles mentions and routes file uploads if present
 @app.event("message")
 def handle_direct_message(event, client: WebClient, logger):
+    real_team = (
+        event.get("team")
+        or event.get("authorizations", [{}])[0].get("team")
+    )
+    # 2) rebind your client
+    client = get_client_for_team(real_team)
     # ignore messages with subtypes (e.g. file_share, bot_message, etc.)
     if event.get("subtype"):
         return
@@ -581,6 +615,12 @@ def handle_direct_message(event, client: WebClient, logger):
     process_conversation(client, event, text)
 @app.event("app_mention")
 def handle_app_mention(event, say, client, logger):
+    real_team = (
+        event.get("team")
+        or event.get("authorizations", [{}])[0].get("team")
+    )
+    # 2) rebind your client
+    client = get_client_for_team(real_team)
     # If a file is attached during the mention, treat it as file_share
     if event.get("files"):
         return handle_file_share(event, client, logger)
@@ -589,3 +629,4 @@ def handle_app_mention(event, say, client, logger):
 
 if __name__=="__main__":
     SocketModeHandler(app,SLACK_APP_TOKEN).start()
+
