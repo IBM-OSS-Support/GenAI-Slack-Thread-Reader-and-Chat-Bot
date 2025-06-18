@@ -391,10 +391,11 @@ def process_conversation(client: WebClient, event, text: str):
         save_stats()
         try:
             summary = analyze_entire_channel(client, channel_id, thread)
+            out = resolve_user_mentions(client, summary)
             send_message(
                 client,
                 ch,
-                summary,
+                out,
                 thread_ts=thread,
                 user_id=uid,
                 export_pdf=True
