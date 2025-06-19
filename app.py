@@ -17,7 +17,7 @@ import io
 from utils.slack_api import send_message
 from chains.chat_chain_mcp import process_message_mcp, _get_memory, _memories
 from chains.analyze_thread import analyze_slack_thread
-from utils.channel_rag import analyze_entire_channel, THREAD_VECTOR_STORES
+from utils.channel_rag import analyze_entire_channel
 from utils.slack_tools import get_user_name
 from utils.export_pdf import render_summary_to_pdf
 from slack_sdk import WebClient
@@ -29,10 +29,12 @@ from utils.vector_store import FaissVectorStore
 from utils.vector_store import FaissVectorStore
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
+from utils.thread_store import THREAD_VECTOR_STORES
 logging.basicConfig(level=logging.DEBUG)
 
+
 # Instantiate a single global vector store
-THREAD_VECTOR_STORES: dict[str, FaissVectorStore] = {}
+# THREAD_VECTOR_STORES: dict[str, FaissVectorStore] = {}
 if not os.path.exists("data"):
     os.makedirs("data", exist_ok=True)
 SLACK_APP_TOKEN      = os.getenv("SLACK_APP_TOKEN")
@@ -399,6 +401,10 @@ def process_conversation(client: WebClient, event, text: str):
                 thread_ts=thread,
                 user_id=uid,
                 export_pdf=True
+            )
+            _get_memory(thread).save_context(
+                {"human_input": f"ANALYZE #{channel_id}"},
+                {"output": summary}
             )
         except Exception as e:
             send_message(
