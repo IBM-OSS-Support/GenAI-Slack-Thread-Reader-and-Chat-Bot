@@ -8,9 +8,9 @@ from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
 from utils.vector_store import FaissVectorStore
 from utils.slack_tools import get_user_name
-
+from utils.thread_store import THREAD_VECTOR_STORES
 # one store per Slack‐thread for channel RAG
-THREAD_VECTOR_STORES: dict[str, FaissVectorStore] = {}
+# THREAD_VECTOR_STORES: dict[str, FaissVectorStore] = {}
 
 # ── LLM + PromptTemplate setup ────────────────────────────────────────────────
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
