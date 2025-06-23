@@ -19,6 +19,35 @@ def send_message(
         {"type": "button", "text": {"type":"plain_text","text":"👎"}, "value":"thumbs_down", "action_id":"vote_down"},
     ]
 
+    translate_controls = {
+        "type": "actions",
+        "block_id": "translate_controls",
+        "elements": [
+            {
+                "type": "static_select",
+                "action_id": "select_language",
+                "placeholder": {
+                    "type": "plain_text",
+                    "text": "Select language"
+                },
+                "options": [
+                    {"text": {"type": "plain_text", "text": "Japanese"}, "value": "ja"},
+                    {"text": {"type": "plain_text", "text": "Spanish"}, "value": "es"},
+                    {"text": {"type": "plain_text", "text": "French"},  "value": "fr"},
+                    {"text": {"type": "plain_text", "text": "Chinese (Simplified)"}, "value": "zh"},
+                    # …add more languages as needed
+                ]
+            },
+            {
+                "type": "button",
+                "action_id": "translate_button",
+                "text": {"type": "plain_text", "text": "Translate"},
+                "style": "primary",
+                "value": "translate_now"
+            }
+        ]
+    }
+
     if export_pdf:
         thumbs.append({
             "type": "button",
@@ -26,11 +55,14 @@ def send_message(
             "action_id": "export_pdf",
             "value": "export_pdf",       # ← short, fixed identifier
         })
+    
 
     blocks = [
         {"type":"section", "text":{"type":"mrkdwn","text":text}},
-        {"type":"actions", "elements": thumbs},
+        {"type":"actions", "elements": thumbs}
     ]
+    if export_pdf:
+        blocks.append(translate_controls)
     try:
         response = client.chat_postMessage(
             channel=channel_id,

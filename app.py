@@ -30,6 +30,7 @@ from utils.vector_store import FaissVectorStore
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
 from utils.thread_store import THREAD_VECTOR_STORES
+from chains.analyze_thread import translation_chain
 logging.basicConfig(level=logging.DEBUG)
 
 
@@ -134,6 +135,43 @@ def index_in_background(vs: FaissVectorStore, docs: list[Document],
             thread_ts=thread_ts,
             user_id=user_id
         )
+@app.action("select_language")
+def handle_language_selection(ack, body, logger):
+    ack()
+    selected = body["actions"][0]["selected_option"]["value"]
+    user_id = body["user"]["id"]
+    logger.info(f"User {user_id} selected language: {selected}")
+
+@app.action("translate_button")
+def handle_translate_click(ack, body, client, logger):
+    # 1) Ack
+    ack()
+
+    # 2) Language choice
+    state_vals = body["state"]["values"]["translate_controls"]
+    lang = state_vals["select_language"]["selected_option"]["value"]
+
+    # 3) Reconstruct original markdown text
+    orig_blocks = body["message"]["blocks"]
+    original_text = "\n".join(
+        blk["text"]["text"]
+        for blk in orig_blocks
+        if blk.get("type") == "section"
+           and isinstance(blk.get("text"), dict)
+           and blk["text"].get("type") == "mrkdwn"
+    )
+
+    # 4) Translate via LLMChain
+    translated = translation_chain.run(text=original_text, language=lang)
+
+    send_message(
+        client,
+        body["channel"]["id"],
+        f":earth_asia: *Translation ({lang}):*\n{translated}",
+        body["message"]["ts"],
+        None,
+        False,  # NEW: allow PDF export of translations
+    )
 def load_stats():
     try:
         with open(STATS_FILE) as f:
