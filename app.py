@@ -103,7 +103,7 @@ def get_client_for_team(team_id: str) -> WebClient:
         raise RuntimeError(f"No token for team {team_id!r}")
     return WebClient(token=bot_token)
 
-STATS_FILE = os.getenv("STATS_FILE", "/data/stats.json")
+STATS_FILE = STATS_FILE = os.path.join("data", "stats.json")
 def index_in_background(vs: FaissVectorStore, docs: list[Document],
                         client: WebClient, channel_id: str,
                         thread_ts: str, user_id: str, filename: str,real_team: str):
@@ -213,6 +213,8 @@ def save_stats():
                 "analyze_followups": USAGE_STATS["analyze_followups"],
                 "general_calls": USAGE_STATS["general_calls"],
                 "general_followups": USAGE_STATS["general_followups"],
+                "feedback_up_reasons": _vote_reasons.get("up", []),
+                "feedback_down_reasons": _vote_reasons.get("down", []),
             }, f)
     except:
         logging.exception("Failed to save stats")
@@ -221,6 +223,11 @@ _stats           = load_stats()
 _unique_users    = _stats["unique_users"]
 _vote_up_count   = _stats["thumbs_up"]
 _vote_down_count = _stats["thumbs_down"]
+_vote_reasons = {
+    "up": _stats.get("feedback_up_reasons", {}) if isinstance(_stats.get("feedback_up_reasons"), dict) else {},
+    "down": _stats.get("feedback_down_reasons", {}) if isinstance(_stats.get("feedback_down_reasons"), dict) else {}
+}
+_feedback_submissions = set()
 
 _last_activity   = {}
 _active_sessions = {}
@@ -303,6 +310,91 @@ def handle_vote_up(ack, body, client):
 def handle_vote_down(ack, body, client):
     ack(); _handle_vote(body, client, "down", "👎")
 
+@app.action(re.compile(r"thumbs_up_feedback_select_\d+"))
+def handle_thumbs_up_feedback(ack, body, client):
+    global _vote_up_count, _vote_reasons, _feedback_submissions
+    ack()
+
+    uid = body["user"]["id"]
+    ts = body["message"]["ts"]
+    ch = body["channel"]["id"]
+    action = body["actions"][0]
+    key = f"{ch}-{ts}-{uid}"
+
+    if key in _feedback_submissions:
+        client.chat_postMessage(
+            channel=ch,
+            thread_ts=ts,
+            text=f"<@{uid}>, you've already submitted feedback for this message. ✅"
+        )
+        return
+    
+    # Generate timestamp
+    feedback_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+
+     # Safe extraction of selected text
+    if "selected_option" in action:
+        selected_text = action["selected_option"]["text"]["text"]
+    elif "value" in action:
+        selected_text = action["value"]
+    elif "text" in action:
+        selected_text = action["text"]["text"]
+    else:
+        selected_text = "Unknown feedback"
+
+    _vote_up_count += 1
+    _vote_reasons.setdefault("up", {})[feedback_time] = selected_text
+    _feedback_submissions.add(key)
+    save_stats()
+
+    client.chat_postMessage(
+        channel=ch,
+        thread_ts=ts,
+        text=f"<@{uid}>, Thank you for your honest feedback ❤️"
+    )
+
+@app.action(re.compile(r"thumbs_down_feedback_select_\d+"))
+def handle_thumbs_down_feedback(ack, body, client):
+    global _vote_down_count, _vote_reasons, _feedback_submissions
+    ack()
+    uid = body["user"]["id"]
+    ts = body["message"]["ts"]
+    ch = body["channel"]["id"]
+    action = body["actions"][0]
+    key = f"{ch}-{ts}-{uid}"
+
+    if key in _feedback_submissions:
+        client.chat_postMessage(
+            channel=ch,
+            thread_ts=ts,
+            text=f"<@{uid}>, you've already submitted feedback for this message. ✅"
+        )
+        return
+
+    # Generate timestamp
+    feedback_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+
+    # Safe extraction of selected text
+    if "selected_option" in action:
+        selected_text = action["selected_option"]["text"]["text"]
+    elif "value" in action:
+        selected_text = action["value"]
+    elif "text" in action:
+        selected_text = action["text"]["text"]
+    else:
+        selected_text = "Unknown feedback"
+
+    _vote_down_count += 1
+    _vote_reasons.setdefault("down", {})[feedback_time] = selected_text
+    _feedback_submissions.add(key)
+    save_stats()
+
+    client.chat_postMessage(
+        channel=ch,
+        thread_ts=ts,
+        text=f"<@{uid}>, Thank you for your honest feedback ❤️"
+    )
+
 def _handle_vote(body, client, vote_type, emoji):
     global _vote_up_count, _vote_down_count
     uid  = body["user"]["id"]
@@ -317,11 +409,20 @@ def _handle_vote(body, client, vote_type, emoji):
             _already_warned[ts].add(uid)
         return
     _vote_registry[ts].add(uid)
-    if vote_type=="up": _vote_up_count+=1
-    else:              _vote_down_count+=1
+    
+    send_message(
+        client, ch,
+        "Thanks for the 👍!" if vote_type == "up" else "Sorry to hear that 👎",
+        thread_ts=ts,
+        show_thumbs_up_feedback=(vote_type == "up"),
+        show_thumbs_down_feedback=(vote_type == "down")
+    )
+
+    if vote_type=="up": 
+        _vote_up_count+=1
+    else: 
+        _vote_down_count+=1
     save_stats()
-    client.chat_postMessage(channel=ch, thread_ts=ts,
-                            text=f"Thanks for your feedback {emoji}")
 
 def track_usage(uid, thread_ts, cmd=None):
     global _unique_users
@@ -674,4 +775,3 @@ def handle_app_mention(event, say, client, logger):
 
 if __name__=="__main__":
     SocketModeHandler(app,SLACK_APP_TOKEN).start()
-
