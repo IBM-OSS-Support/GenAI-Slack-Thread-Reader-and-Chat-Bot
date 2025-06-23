@@ -103,7 +103,7 @@ def get_client_for_team(team_id: str) -> WebClient:
         raise RuntimeError(f"No token for team {team_id!r}")
     return WebClient(token=bot_token)
 
-STATS_FILE = STATS_FILE = os.path.join("data", "stats.json")
+STATS_FILE = os.getenv("STATS_FILE", "/data/stats.json")
 def index_in_background(vs: FaissVectorStore, docs: list[Document],
                         client: WebClient, channel_id: str,
                         thread_ts: str, user_id: str, filename: str,real_team: str):
