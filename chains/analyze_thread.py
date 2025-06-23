@@ -72,6 +72,19 @@ User instructions:
 Please follow these instructions exactly and respond in plain text.
 """
 )
+translation_prompt = PromptTemplate(
+    input_variables=["text", "language"],
+    template=(
+        "Translate the following Slack message (in Slack markdown) into {language},\n"
+        "preserving all formatting. Do not add or remove any markdown syntax:\n\n"
+        "```{text}```"
+    )
+)
+translation_chain = LLMChain(llm=llm, prompt=translation_prompt)
+
+# Ensure data directory exists
+if not os.path.exists("data"):
+    os.makedirs("data", exist_ok=True)
 
 summarizer   = LLMChain(llm=llm, prompt=default_prompt)
 custom_chain = LLMChain(llm=llm, prompt=custom_prompt)
