@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: slack-bot
+  namespace: llm
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: slack-bot
+  template:
+    metadata:
+      labels:
+        app: slack-bot
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: worker3.epgui.cp.fyre.ibm.com
+      containers:
+      - name: slack-bot
+        image: ghcr.io/ibm-oss-support/slack-bot:__VERSION__
+        imagePullPolicy: Always
+        env:
+        - name: TEAM1_ID
+          valueFrom:
+            secretKeyRef:
+              name: slack-secrets
+              key: TEAM1_ID
+        - name: TEAM1_BOT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: slack-secrets
+              key: TEAM1_BOT_TOKEN
+        - name: TEAM2_ID
+          valueFrom:
+            secretKeyRef:
+              name: slack-secrets
+              key: TEAM2_ID
+        - name: TEAM2_BOT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: slack-secrets
+              key: TEAM2_BOT_TOKEN
+        - name: SLACK_APP_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: slack-secrets
+              key: SLACK_APP_TOKEN
+        - name: SLACK_SIGNING_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: slack-secrets
+              key: SLACK_SIGNING_SECRET
+        - name: BOT_USER_ID
+          valueFrom:
+            secretKeyRef:
+              name: slack-secrets
+              key: BOT_USER_ID
+        - name: OLLAMA_BASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: slack-secrets
+              key: OLLAMA_BASE_URL
+        - name: SESSION_EXPIRATION_SECONDS
+          valueFrom:
+            secretKeyRef:
+              name: slack-secrets
+              key: SESSION_EXPIRATION_SECONDS
+        - name: FORMATTED_CHANNELS
+          valueFrom:
+            secretKeyRef:
+              name: slack-secrets
+              key: FORMATTED_CHANNELS
+        - name: STATS_FILE
+          valueFrom:
+            secretKeyRef:
+              name: slack-secrets
+              key: STATS_FILE
+        - name: VECTOR_INDEX_PATH
+          valueFrom:
+            secretKeyRef:
+              name: slack-secrets
+              key: VECTOR_INDEX_PATH
+        - name: DOCSTORE_PATH
+          valueFrom:
+            secretKeyRef:
+              name: slack-secrets
+              key: DOCSTORE_PATH
+        volumeMounts:
+        - name: stats-volume
+          mountPath: /app/data
+      volumes:
+      - name: stats-volume
+        persistentVolumeClaim:
+          claimName: bot-prod-stats-pvc
