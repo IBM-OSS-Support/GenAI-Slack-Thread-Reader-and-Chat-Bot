@@ -12,6 +12,7 @@ from langchain_community.llms import Ollama
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
 
+from utils.resolve_user_mentions import resolve_user_mentions
 from chains.chat_chain_mcp import process_message_mcp
 from utils.slack_tools import fetch_slack_thread, get_user_name
 from slack_sdk import WebClient
@@ -30,32 +31,52 @@ llm = Ollama(
 default_prompt = PromptTemplate(
     input_variables=["messages"],
     template="""
-You are a Slack assistant. Here’s the full thread (with speakers + timestamps):
+You are a Slack assistant summarizing internal support or escalation threads. Below is the full message thread with speakers and timestamps:
 
 {messages}
 
-Produce **exactly** these five sections in Slack markdown, and **only** these—stop after Action Items.
+Your output must contain **exactly these five sections**, using **Slack markdown formatting** (asterisks for bold section titles, no bold in body). Do not add anything outside these sections. Do not add explanations.
+
+---
 
 *Summary*  
-- One brief sentence summarizing the entire thread.
+- Write **one clear sentence** summarizing the entire thread. Be specific about what triggered the thread (e.g., escalation, request, incident).
 
 *Business Impact*  
-- Explain Revenue at risk (if any).  
-- Explain Operational impact (if any).  
-- Explain Customer impact (if any).  
-- Explain Team impact (if any).  
-- Explain Other impacts (if any).
-
-*(Only include bullets for impacts explicitly stated in the thread.)*
+- Only include bullets for impacts **explicitly mentioned in the thread**.  
+- Use the following bullet format:
+  - *Revenue at risk*: Describe risk to Watson or IBM revenue.
+  - **Operational impact**: Describe what is blocked or degraded.
+  - *Customer impact*: Describe how the customer is affected, including any leadership mention (e.g., CIO-level).
+  - *Team impact*: Mention any IBM team concerns, delays, or credibility issues.
+  - *Other impacts*: List any escalation triggers (e.g., Duty Manager contacted, credibility risk, etc.)
 
 *Key Points Discussed*  
-- 3-5 concise bullets capturing the main discussion points.
+- List 3–6 bullets summarizing specific events, facts, or updates.  
+- Focus on what was done, requested, stated, or observed.  
+- Use speaker names **only** if it clarifies the point.  
+- Do not add any information not present in the thread.
 
 *Decisions Made*  
-- Bullets prefixed with who made the decision, e.g. `@username: decision`.
+- List **all concrete decisions**, even logistical ones (like scheduling a call or taking ownership).  
+- Use this format:
+  - **@username** decided to ___ [DD/MM/YYYY HH:MM IST]  
+- Include decisions like:  
+  - Taking ownership of the case  
+  - Scheduling or committing to calls  
+  - Updating the case or escalation system  
+  - Any explicit agreement or acknowledgment to act
 
 *Action Items*  
-- Bullets prefixed with `@username:`, include due-dates if mentioned.
+- List only **clearly stated follow-up actions** assigned to specific people.  
+- Use this format:
+  - **@username** to ___ [DD/MM/YYYY HH:MM IST]  
+- Include due-dates only if explicitly mentioned. Do not guess or infer.
+
+---
+
+Strictly follow the format. Do **not invent** any bullet or timestamp. If something is missing, leave it out—do not assume.
+
 """
 )
 
@@ -118,7 +139,7 @@ def analyze_slack_thread(
         text = m.get("text", "").replace("\n", " ")
         lines.append(f"{human_ts} {speaker}: {text}")
 
-    blob = "\n".join(lines)
+    blob = resolve_user_mentions ( client,"\n".join(lines))
 
     # 3) Select chain & kwargs
     if default:
