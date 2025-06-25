@@ -164,7 +164,7 @@ def handle_translate_click(ack, body, client, logger):
     )
 
     # 4) Translate via LLMChain
-    translated = translation_chain.run(text=original_text, language=lang).replace("[DD/MM/YYYY HH:MM IST]", "").replace("*@username*", "").strip()
+    translated = translation_chain.run(text=original_text, language=lang).replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
 
     send_message(
         client,
@@ -403,7 +403,7 @@ def process_conversation(client: WebClient, event, text: str):
         USAGE_STATS["analyze_calls"] += 1
         save_stats()
         try:
-            summary = analyze_entire_channel(client, channel_id, thread).replace("[DD/MM/YYYY HH:MM IST]", "").replace("*@username*", "").strip()
+            summary = analyze_entire_channel(client, channel_id, thread).replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
             # out = resolve_user_mentions(client, summary)
             send_message(
                 client,
@@ -451,10 +451,10 @@ def process_conversation(client: WebClient, event, text: str):
         try:
             export_pdf = False
             if cid in FORMATTED_CHANNELS:
-                summary = analyze_slack_thread(client, cid, ts10,instructions=cmd, default=False).replace("[DD/MM/YYYY HH:MM IST]", "").replace("*@username*", "").strip()
+                summary = analyze_slack_thread(client, cid, ts10,instructions=cmd, default=False).replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
                 export_pdf = True
             else:
-                summary = analyze_slack_thread(client, cid, ts10, instructions=cmd, default=True).replace("[DD/MM/YYYY HH:MM IST]", "").replace("*@username*", "").strip()
+                summary = analyze_slack_thread(client, cid, ts10, instructions=cmd, default=True).replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
 
             # out = resolve_user_mentions(client, summary)
             send_message(
