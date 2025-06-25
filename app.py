@@ -242,35 +242,6 @@ USAGE_STATS = {
 
 # NEW: track which threads began as an analysis
 ANALYSIS_THREADS: set[str] = set()
-
-def get_channel_name(client: WebClient, channel_id: str) -> str:
-    try:
-        info = client.conversations_info(channel=channel_id)
-        if info.get("ok"):
-            return f"#{info['channel']['name']}"
-    except SlackApiError:
-        logging.exception(f"Failed channel.info for {channel_id}")
-    return f"#{channel_id}"
-
-def resolve_user_mentions(client: WebClient, text: str) -> str:
-    text = re.sub(r"@<(@?[UW][A-Z0-9]{8,})>", r"<\1>", text)
-    text = re.sub(
-        r"<@([UW][A-Z0-9]{8,})>",
-        lambda m: f"@{get_user_name(client, m.group(1))}",
-        text,
-    )
-    text = re.sub(
-        r"\b([UW][A-Z0-9]{8,})\b",
-        lambda m: f"@{get_user_name(client, m.group(1))}"
-                  if m.group(1).startswith(("U","W")) else m.group(1),
-        text,
-    )
-    text = re.sub(
-        r"<#(C[A-Z0-9]{8,})(?:\|[^>]+)?>",
-        lambda m: get_channel_name(client, m.group(1)),
-        text,
-    )
-    return text
 @app.action("export_pdf")
 def handle_export_pdf(ack, body, client, logger):
     ack()
@@ -431,11 +402,11 @@ def process_conversation(client: WebClient, event, text: str):
         save_stats()
         try:
             summary = analyze_entire_channel(client, channel_id, thread)
-            out = resolve_user_mentions(client, summary)
+            # out = resolve_user_mentions(client, summary)
             send_message(
                 client,
                 ch,
-                out,
+                summary,
                 thread_ts=thread,
                 user_id=uid,
                 export_pdf=True
@@ -483,11 +454,11 @@ def process_conversation(client: WebClient, event, text: str):
             else:
                 summary = analyze_slack_thread(client, cid, ts10, instructions=cmd, default=True)
 
-            out = resolve_user_mentions(client, summary)
+            # out = resolve_user_mentions(client, summary)
             send_message(
                 client,
                 ch,
-                out,
+                summary,
                 thread_ts=thread,
                 user_id=uid,
                 export_pdf=export_pdf
@@ -540,9 +511,9 @@ def process_conversation(client: WebClient, event, text: str):
                 USAGE_STATS["general_followups"] += 1
         save_stats()
 
-        out = resolve_user_mentions(client, reply)
+        # out = resolve_user_mentions(client, reply)
         send_message(
-            client, ch, out,
+            client, ch, reply,
             thread_ts=thread, user_id=uid
         )
 @app.event({"type": "message", "subtype": "file_share"})
