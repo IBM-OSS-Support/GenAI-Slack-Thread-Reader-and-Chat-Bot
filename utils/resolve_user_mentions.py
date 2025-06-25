@@ -17,12 +17,12 @@ def get_channel_name(client: WebClient, channel_id: str) -> str:
 def resolve_user_mentions(client: WebClient, text: str) -> str:
     text = re.sub(r"@<(@?[UW][A-Z0-9]{8,})>", r"<\1>", text)
     text = re.sub(
-        r"<@([UW][A-Z0-9]{8,})>",
+        r"<@([UWB][A-Z0-9]{8,})>",
         lambda m: f"@{get_user_name(client, m.group(1))}",
         text,
     )
     text = re.sub(
-        r"\b([UW][A-Z0-9]{8,})\b",
+        r"\b([UWB][A-Z0-9]{8,})\b",
         lambda m: f"@{get_user_name(client, m.group(1))}"
                   if m.group(1).startswith(("U","W")) else m.group(1),
         text,
