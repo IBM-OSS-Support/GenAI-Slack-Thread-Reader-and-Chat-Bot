@@ -59,12 +59,12 @@ Your output must contain **exactly these five sections**, using **Slack markdown
 *Decisions Made*  
 - List **all concrete decisions**, even logistical ones (like scheduling a call or taking ownership).  
 - Use this format:
-  - *@username* decided to ___ [DD/MM/YYYY HH:MM IST]
+  - *@username* decided to ___ [DD/MM/YYYY HH:MM UTC]
 
 *Action Items*  
 - List only *clearly stated follow-up actions* assigned to specific people.  
 - Use this format:
-  - *@username* to ___ [DD/MM/YYYY HH:MM IST]  
+  - *@username* to ___ [DD/MM/YYYY HH:MM UTC]  
 - Include due-dates only if explicitly mentioned. Do not guess or infer.
 
 ---
