@@ -1,11 +1,16 @@
 name: Build, Push & Deploy to OpenShift
 
 on:
-  push:
-    branches: [main, dev]
+  pull_request:
+    branches:
+      - dev
+      - main
+    types:
+      - closed
 
 jobs:
   deploy:
+    if: github.event.pull_request.merged == true
     runs-on: [self-hosted]
 
     env:
@@ -65,20 +70,17 @@ jobs:
 
           if [ "$BRANCH" = "dev" ]; then
             echo "namespace=dev" >> "$GITHUB_OUTPUT"
-            echo "deploy_path=${{ secrets.DEPLOY_PATH_DEV }}" >> "$GITHUB_OUTPUT"
-          elif [ "$BRANCH" = "main" ] || [ "$BRANCH" = "Automation" ]; then
+            echo "deploy_dir=deploy-dev" >> "$GITHUB_OUTPUT"
+          elif [ "$BRANCH" = "main" ]; then
             echo "namespace=llm" >> "$GITHUB_OUTPUT"
-            echo "deploy_path=${{ secrets.DEPLOY_PATH_MAIN }}" >> "$GITHUB_OUTPUT"
+            echo "deploy_dir=deploy-prod" >> "$GITHUB_OUTPUT"
           else
             echo "Unsupported branch: $BRANCH"
             exit 1
           fi
 
-          echo "repo_path=${{ secrets.REPO_PATH }}" >> "$GITHUB_OUTPUT"
-
       - name: Build image
         run: |
-          cd $GITHUB_WORKSPACE
           podman build -t $IMAGE_NAME . > /tmp/build.log 2>&1 || {
             echo "Build failed:"
             cat /tmp/build.log
@@ -93,15 +95,9 @@ jobs:
             exit 1
           }
 
-      - name: Prepare manifest copy
+      - name: Replace version in manifests
         run: |
-          rm -rf /tmp/deploy-manifests
-          mkdir -p /tmp/deploy-manifests
-          cp -r ${{ steps.config.outputs.deploy_path }}/* /tmp/deploy-manifests/
-
-      - name: Replace version in manifests and verify
-        run: |
-          cd /tmp/deploy-manifests
+          cd ${{ steps.config.outputs.deploy_dir }}
           echo "Replacing __VERSION__ with '${{ steps.version.outputs.tag }}'..."
           find . -type f -name '*.yaml' -exec sed -i "s|__VERSION__|${{ steps.version.outputs.tag }}|g" {} +
 
@@ -111,7 +107,7 @@ jobs:
 
       - name: Validate manifests
         run: |
-          cd /tmp/deploy-manifests
+          cd ${{ steps.config.outputs.deploy_dir }}
           for file in *.yaml; do
             echo "Validating $file"
             oc apply --dry-run=client -f "$file" >> /tmp/deploy.log 2>&1 || {
@@ -123,8 +119,8 @@ jobs:
 
       - name: Apply manifests
         run: |
-          echo "Applying manifests from /tmp/deploy-manifests"
-          oc apply -f /tmp/deploy-manifests/ >> /tmp/deploy.log 2>&1 || {
+          echo "Applying manifests from ${{ steps.config.outputs.deploy_dir }}"
+          oc apply -f ${{ steps.config.outputs.deploy_dir }} >> /tmp/deploy.log 2>&1 || {
             echo "Apply failed"
             cat /tmp/deploy.log
             exit 1
@@ -137,9 +133,9 @@ jobs:
 
           echo "Waiting for rollout to complete..."
           oc rollout status deployment/slack-bot -n ${{ steps.config.outputs.namespace }} >> /tmp/rollout.log 2>&1 || {
-          echo "Rollout failed: slack-bot"
-          cat /tmp/rollout.log
-          exit 1
+            echo "Rollout failed: slack-bot"
+            cat /tmp/rollout.log
+            exit 1
           }
 
       - name: Upload logs (always)
