@@ -1,4 +1,6 @@
 from dotenv import load_dotenv
+
+from utils.resolve_user_mentions import resolve_user_mentions
 load_dotenv()
 
 import json
