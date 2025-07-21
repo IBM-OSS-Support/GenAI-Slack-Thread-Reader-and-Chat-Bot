@@ -20,7 +20,6 @@ llm = Ollama(
     base_url=OLLAMA_BASE_URL,
     temperature=0.0,
 )
-
 channel_prompt = PromptTemplate(
     input_variables=["messages"],
     template="""
@@ -44,7 +43,7 @@ Your output must contain **exactly these five sections**, using **Slack markdown
   - *Other impacts*: List any escalation triggers (e.g., Duty Manager contacted, credibility risk, etc.)
 
 *Key Points Discussed*  
-- List 3–6 bullets summarizing specific events, facts, or updates.  
+- List  bullets summarizing specific events, facts, or updates.  
 - Focus on what was done, requested, stated, or observed.  
 - Use speaker names **only** if it clarifies the point.  
 - Do not add any information not present in the thread.
@@ -74,14 +73,8 @@ def analyze_entire_channel(
     channel_id: str,
     thread_ts: str
 ) -> str:
-    """
-    1) Paginate channel history (top‐level messages & their replies).
-    2) Concatenate, chunk, and index _all_ that text into FAISS under THREAD_VECTOR_STORES[thread_ts].
-    3) Ask your Granite LLM for a channel summary.
-    """
     # ── fetch every top‐level message + replies ───────────────────────────────
     def safe_number_wrap(text):
-    # Avoid wrapping digits inside user mentions like <@U08PN8WJRAA>
         return re.sub(r'(?<!<@U)(\d+%?)(?!>)', r'`\1`', text)
     cursor = None
     blocks = []
@@ -89,17 +82,12 @@ def analyze_entire_channel(
         resp = client.conversations_history(channel=channel_id, limit=200, cursor=cursor)
         for m in resp["messages"]:
             ts = m["ts"]
-            # skip reply messages here; we'll fetch them below
             if m.get("thread_ts") and m["thread_ts"] != ts:
                 continue
-
-            # prefix each message with the poster's name and timestamp
             user_id = m.get("user") or m.get("bot_id", "<unknown>")
             name = get_user_name(client, user_id)
             header = f"*{name}* ({ts}):"
             texts = [f"{header} {m.get('text', '')}"]
-
-            # include any replies
             if int(m.get("reply_count", 0)) > 0:
                 replies = client.conversations_replies(channel=channel_id, ts=ts, limit=1000)
                 for r in replies.get("messages", [])[1:]:
@@ -107,34 +95,13 @@ def analyze_entire_channel(
                     r_name = get_user_name(client, r_user)
                     r_ts = r["ts"]
                     texts.append(f"*{r_name}* ({r_ts}): {r.get('text', '')}")
-
             blocks.append("\n".join(texts))
-
         cursor = resp.get("response_metadata", {}).get("next_cursor")
         if not cursor:
             break
-
     if not blocks:
         return f":warning: No messages found in <#{channel_id}>."
-
-    # combine all blocks and escape percentages/digits
-    raw_all = resolve_user_mentions(client,"\n\n---\n\n".join(blocks))
-    # raw_all = re.sub(r"(\d+%?)", r"`\1`", raw_all)
-
-    # ── chunk & index into FAISS ─────────────────────────────────────────────
-    vs = THREAD_VECTOR_STORES.get(thread_ts)
-    if not vs:
-        idx = f"data/faiss_{thread_ts.replace('.', '_')}.index"
-        ds = f"data/docstore_{thread_ts.replace('.', '_')}.pkl"
-        vs = FaissVectorStore(index_path=idx, docstore_path=ds)
-        THREAD_VECTOR_STORES[thread_ts] = vs
-
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    chunks = splitter.split_text(raw_all)
-    docs = [Document(page_content=chunk, metadata={"channel": channel_id}) for chunk in chunks]
-    vs.add_documents(docs)
-
-    # ── generate summary via chain ───────────────────────────────────────────
+    raw_all = resolve_user_mentions(client, "\n\n---\n\n".join(blocks))
     try:
         return channel_summary_chain.run(messages=raw_all)
     except Exception as e:
