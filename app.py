@@ -620,50 +620,49 @@ def process_conversation(client: WebClient, event, text: str):
             thread_ts=thread, user_id=uid
         )
 @app.event({"type": "message", "subtype": "file_share"})
-def handle_file_share(body,event, client: WebClient, logger):
+def handle_file_share(body, event, client: WebClient, logger):
     real_team = (
         body.get("team_id")
         # fallback if you’re using authorizations array:
         or (body.get("authorizations") or [{}])[0].get("team_id")
     )
-    logging.debug(f"Handling file share for team {real_team!r}")
-    # 2) rebind your client
+    logger.debug(f"Handling file share for team {real_team!r}")
+    # Rebind your client
     client = get_client_for_team(real_team)
     files = event.get("files", [])
     if not files:
         return
-    file_obj   = files[0]
-    file_id    = file_obj["id"]
+    file_obj = files[0]
+    file_id = file_obj["id"]
     channel_id = event["channel"]
-    user_id    = event.get("user")
-    file_name  = file_obj.get("name", "")
-    supported = {"pdf", "docx", "doc", "txt", "md", "csv", "py"}
-    ext = file_name.rsplit(".", 1)[-1].lower()
+    user_id = event.get("user")
+    file_name = file_obj.get("name", "")
     thread_ts = event.get("thread_ts") or event.get("ts")
 
-    # 1️⃣ Check against supported extensions
-    supported = {"pdf", "docx", "doc", "txt", "md", "csv", "py"}
-    ext = file_name.rsplit(".", 1)[-1].lower()
+    # Check against supported extensions (added Excel support)
+    supported = {"pdf", "docx", "doc", "txt", "md", "csv", "py", "xlsx", "xls"}
+    ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
     if ext not in supported:
         send_message(
             client,
             channel_id,
             (
-            f"⚠️ Oops—I can’t handle *.{ext}* files yet. "
-            "Right now I only support:\n"
-            "• PDF (.pdf)\n"
-            "• Word documents (.docx, .doc)\n"
-            "• Plain-text & Markdown (.txt, .md)\n"
-            "• CSV files (.csv)\n"
-            "• Python scripts (.py)"
-        ),
+                f"⚠️ Oops—I can’t handle *.{ext}* files yet. "
+                "Right now I only support:\n"
+                "• PDF (.pdf)\n"
+                "• Word documents (.docx, .doc)\n"
+                "• Plain-text & Markdown (.txt, .md)\n"
+                "• CSV files (.csv)\n"
+                "• Python scripts (.py)\n"
+                "• Excel files (.xlsx, .xls)"
+            ),
             thread_ts=thread_ts,
             user_id=user_id
         )
         return
 
     try:
-        resp      = client.files_info(file=file_id)
+        resp = client.files_info(file=file_id)
         file_info = resp["file"]
     except SlackApiError as e:
         logger.error(f"files_info failed: {e.response['error']}")
@@ -672,17 +671,16 @@ def handle_file_share(body,event, client: WebClient, logger):
     local_path = None
     try:
         local_path = download_slack_file(client, file_info)
-        raw_text   = extract_text_from_file(local_path)
+        raw_text = extract_text_from_file(local_path)
     except Exception as e:
         logger.exception(f"Error retrieving file {file_id}: {e}")
-        send_message(client, channel_id, f"❌ Failed to download *{file_info.get('name')}*: {e}", thread_ts=event.get("ts"), user_id=user_id)
+        send_message(client, channel_id, f"❌ Failed to download *{file_info.get('name')}*: {e}", thread_ts=thread_ts, user_id=user_id)
         return
 
     if not raw_text.strip():
-        send_message(client, channel_id, f"⚠️ I couldn’t extract any text from *{file_info.get('name')}*.", thread_ts=event.get("ts"), user_id=user_id)
+        send_message(client, channel_id, f"⚠️ I couldn’t extract any text from *{file_info.get('name')}*.", thread_ts=thread_ts, user_id=user_id)
         return
 
-    thread_ts = event.get("thread_ts") or event["ts"]
     if thread_ts not in THREAD_VECTOR_STORES:
         safe_thread = thread_ts.replace(".", "_")
         THREAD_VECTOR_STORES[thread_ts] = FaissVectorStore(
@@ -691,13 +689,12 @@ def handle_file_share(body,event, client: WebClient, logger):
     vs = THREAD_VECTOR_STORES[thread_ts]
 
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-    chunks   = splitter.split_text(raw_text)
-    docs     = [Document(page_content=chunk, metadata={"file_name": file_info.get("name"),"file_id": file_id,"chunk_index": i}) for i, chunk in enumerate(chunks)]
+    chunks = splitter.split_text(raw_text)
+    docs = [Document(page_content=chunk, metadata={"file_name": file_info.get("name"), "file_id": file_id, "chunk_index": i}) for i, chunk in enumerate(chunks)]
 
     send_message(client, channel_id, f"⏳ Received *{file_info.get('name')}*. Indexing now…", thread_ts=thread_ts, user_id=user_id)
-    logging.debug("d jdnjdnjdnjdnjkdn   %s",real_team)
-    threading.Thread(target=index_in_background, args=(vs, docs, client, channel_id, thread_ts, user_id, file_info.get("name"),real_team), daemon=True).start()
-
+    logger.debug(f"Starting background indexing for team {real_team}")
+    threading.Thread(target=index_in_background, args=(vs, docs, client, channel_id, thread_ts, user_id, file_info.get("name"), real_team), daemon=True).start()
 # App mention handler: handles mentions and routes file uploads if present
 @app.event("message")
 def handle_direct_message(body,event, client: WebClient, logger):

@@ -11,6 +11,8 @@ from typing import List
 # For text extraction
 from PyPDF2 import PdfReader
 import docx
+import openpyxl  # Added for .xlsx support
+import xlrd      # Added for .xls support
 
 def sanitize_filename(fn: str) -> str:
     """
@@ -47,7 +49,7 @@ def download_slack_file(client: WebClient, file_info: dict) -> str:
 
 def extract_text_from_file(path: str) -> str:
     """
-    Basic text extraction: PDF or DOCX or plain text.
+    Basic text extraction: PDF, DOCX, Excel (.xlsx/.xls), or plain text.
     """
     ext = path.lower().split(".")[-1]
     if ext == "pdf":
@@ -60,6 +62,24 @@ def extract_text_from_file(path: str) -> str:
         doc = docx.Document(path)
         paragraphs = [p.text for p in doc.paragraphs]
         return "\n".join(paragraphs)
+    elif ext == "xlsx":
+        wb = openpyxl.load_workbook(path, read_only=True)
+        text = []
+        for sheet in wb:
+            for row in sheet.iter_rows():
+                row_text = [cell.value for cell in row if cell.value is not None]
+                if row_text:
+                    text.append(" ".join(map(str, row_text)))
+        return "\n".join(text)
+    elif ext == "xls":
+        wb = xlrd.open_workbook(path)
+        text = []
+        for sheet in wb.sheets():
+            for row_idx in range(sheet.nrows):
+                row_text = [str(cell.value) for cell in sheet.row(row_idx) if cell.value]
+                if row_text:
+                    text.append(" ".join(row_text))
+        return "\n".join(text)
     else:
         # Try reading as plain text
         try:
