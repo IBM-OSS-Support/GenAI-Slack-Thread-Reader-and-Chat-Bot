@@ -698,8 +698,13 @@ def handle_file_share(body, event, client: WebClient, logger):
 # App mention handler: handles mentions and routes file uploads if present
 @app.event("message")
 def handle_direct_message(body,event, client: WebClient, logger):
-    real_team = body.get("team_id")
-    # 2) rebind your client
+   # pick the real workspace:
+    real_team = (
+        event.get("source_team")
+        or event.get("user_team")
+        or event.get("team")
+        or body.get("team_id")
+    )
     client = get_client_for_team(real_team)
     # ignore messages with subtypes (e.g. file_share, bot_message, etc.)
     if event.get("subtype"):
