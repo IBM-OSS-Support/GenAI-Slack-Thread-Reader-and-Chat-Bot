@@ -1,5 +1,3 @@
-# utils/file_utils.py
-
 import os
 import tempfile
 import requests
@@ -13,13 +11,15 @@ from PyPDF2 import PdfReader
 import docx
 import openpyxl  # Added for .xlsx support
 import xlrd      # Added for .xls support
+from langchain.schema import Document
 
 def sanitize_filename(fn: str) -> str:
     """
     Replace any character that is not alphanumeric, dot, hyphen, or underscore 
-    with an underscore. This avoids the slugify/Unicode issues.
+    with an underscore. This avoids slugify/Unicode issues.
     """
     return re.sub(r'[^A-Za-z0-9_.-]', '_', fn)
+
 
 def download_slack_file(client: WebClient, file_info: dict) -> str:
     """
@@ -46,6 +46,7 @@ def download_slack_file(client: WebClient, file_info: dict) -> str:
         f.write(response.content)
 
     return tmp_path
+
 
 def extract_text_from_file(path: str) -> str:
     """
@@ -85,6 +86,43 @@ def extract_text_from_file(path: str) -> str:
         try:
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
                 return f.read()
-        except Exception as e:
-            # If it’s not text, return empty or raise
+        except Exception:
             return ""
+
+
+def extract_excel_rows(path: str) -> List[Document]:
+    """
+    Read each sheet in the workbook and return a Document per row,
+    with metadata['row_index'] and ['sheet_name'] for exact lookups.
+    """
+    wb = openpyxl.load_workbook(path, read_only=True)
+    docs: List[Document] = []
+    for sheet in wb.worksheets:
+        # Read header values from the first row
+        header_values = []
+        header_row = next(sheet.iter_rows(min_row=1, max_row=1, values_only=True), None)
+        if header_row:
+            header_values = [str(h) for h in header_row]
+
+        # Iterate over data rows starting from the second row
+        for i, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=0):
+            # Skip completely empty rows
+            if not any(cell is not None for cell in row):
+                continue
+
+            # Pair with headers if they match length, else just stringify values
+            if header_values and len(header_values) == len(row):
+                pieces = [f"{header_values[j]}: {row[j]}" for j in range(len(row))]
+            else:
+                pieces = [str(c) for c in row if c is not None]
+
+            text = " | ".join(pieces)
+            docs.append(Document(
+                page_content=text,
+                metadata={
+                    "file_name": os.path.basename(path),
+                    "sheet_name": sheet.title,
+                    "row_index": i
+                }
+            ))
+    return docs

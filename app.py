@@ -1,8 +1,12 @@
+import tempfile
 from dotenv import load_dotenv
+import pandas as pd
+import requests
 
 from utils.resolve_user_mentions import resolve_user_mentions
 load_dotenv()
-
+from utils.url_indexer import crawl_and_index
+from utils.url_indexer import crawl_and_index
 import json
 import os
 import threading
@@ -24,7 +28,7 @@ from utils.slack_tools import get_user_name
 from utils.export_pdf import render_summary_to_pdf
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
-from utils.file_utils import download_slack_file, extract_text_from_file
+from utils.file_utils import download_slack_file, extract_excel_rows, extract_text_from_file
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
 from utils.vector_store import FaissVectorStore
@@ -48,6 +52,12 @@ TEAM_BOT_TOKENS = {
     os.getenv("TEAM1_ID"): os.getenv("TEAM1_BOT_TOKEN"),
     os.getenv("TEAM2_ID"): os.getenv("TEAM2_BOT_TOKEN"),
 }
+
+
+THREAD_TABLE_DFS: dict[str, pd.DataFrame] = {}
+# Regex for row queries
+ROW_PATTERN = re.compile(r"(?:first|second|last|row\s*(\d+)) row", re.IGNORECASE)
+
 formatted = os.getenv("FORMATTED_CHANNELS", "")
 FORMATTED_CHANNELS = {ch.strip() for ch in formatted.split(",") if ch.strip()}
 logging.info(f"Formatted channels: {FORMATTED_CHANNELS}")
@@ -97,7 +107,6 @@ app = App(
     signing_secret=SLACK_SIGNING_SECRET,
     authorize=custom_authorize,       # ← still do per-event auth here
 )
-
 def get_client_for_team(team_id: str) -> WebClient:
     bot_token = TEAM_BOT_TOKENS.get(team_id)
     logging.debug(f"Getting client for team {team_id!r} with token {bot_token!r}")
@@ -422,6 +431,23 @@ def process_conversation(client: WebClient, event, text: str):
     ts      = event["ts"]
     thread  = event.get("thread_ts") or ts
     uid     = event["user"]
+    thread = event.get("thread_ts") or ts
+
+    if ts in THREAD_TABLE_DFS:
+        m = ROW_PATTERN.search(text)
+        if m:
+            df = THREAD_TABLE_DFS[thread]
+            if m.group(1):
+                idx = int(m.group(1)) - 1
+            else:
+                word = m.group(0).lower()
+                idx = {"first":0, "second":1, "last":len(df)-1}[next(w for w in ("first","second","last") if w in word)]
+            if 0 <= idx < len(df):
+                row = df.iloc[idx].to_dict()
+                send_message(client, ch,
+                             f"*Row {idx+1}:*```{row}```",
+                             thread_ts=ts, user_id=uid)
+                return
 
     # Expiration check
     now = time.time()
@@ -534,6 +560,41 @@ def process_conversation(client: WebClient, event, text: str):
             )
         return
     m = re.search(r"https://[^/]+/archives/([^/]+)/p(\d+)", normalized, re.IGNORECASE)
+    if normalized.startswith("http://") or normalized.startswith("https://"):
+        if thread not in THREAD_VECTOR_STORES:
+            safe_thread = thread.replace(".", "_")
+            THREAD_VECTOR_STORES[thread] = FaissVectorStore(
+                index_path=f"data/faiss_{safe_thread}.index",
+                docstore_path=f"data/docstore_{safe_thread}.pkl"
+            )
+        vs = THREAD_VECTOR_STORES[thread]
+
+        send_message(
+            client,
+            ch,
+            f"🔎 Crawling and indexing content from <{normalized}>...",
+            thread_ts=thread,
+            user_id=uid
+        )
+
+        try:
+            count = crawl_and_index(normalized, thread, vs)
+            send_message(
+                client,
+                ch,
+                f"✅ Indexed {count} content chunks from <{normalized}>.\nAsk your questions below 👇",
+                thread_ts=thread,
+                user_id=uid
+            )
+        except Exception as e:
+            send_message(
+                client,
+                ch,
+                f"❌ Failed to crawl URL: {e}",
+                thread_ts=thread,
+                user_id=uid
+            )
+        return
     if m:
         # if initial analysis → analyze_calls + track thread
         if not is_followup:
@@ -622,79 +683,118 @@ def process_conversation(client: WebClient, event, text: str):
 @app.event({"type": "message", "subtype": "file_share"})
 def handle_file_share(body, event, client: WebClient, logger):
     real_team = (
-        body.get("team_id")
-        # fallback if you’re using authorizations array:
-        or (body.get("authorizations") or [{}])[0].get("team_id")
+        event.get("source_team")
+        or event.get("user_team")
+        or event.get("team")
+        or body.get("team_id")
     )
-    logger.debug(f"Handling file share for team {real_team!r}")
-    # Rebind your client
-    client = get_client_for_team(real_team)
-    files = event.get("files", [])
-    if not files:
-        return
-    file_obj = files[0]
+    client = WebClient(token=TEAM_BOT_TOKENS.get(real_team))
+
+    file_obj = event.get("files", [])[0]
     file_id = file_obj["id"]
     channel_id = event["channel"]
     user_id = event.get("user")
+    thread = event.get("thread_ts") or event.get("ts")
+
     file_name = file_obj.get("name", "")
-    thread_ts = event.get("thread_ts") or event.get("ts")
+    ext = file_name.rsplit(".", 1)[-1].lower()
 
-    # Check against supported extensions (added Excel support)
-    supported = {"pdf", "docx", "doc", "txt", "md", "csv", "py", "xlsx", "xls"}
-    ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
-    if ext not in supported:
-        send_message(
-            client,
-            channel_id,
-            (
-                f"⚠️ Oops—I can’t handle *.{ext}* files yet. "
-                "Right now I only support:\n"
-                "• PDF (.pdf)\n"
-                "• Word documents (.docx, .doc)\n"
-                "• Plain-text & Markdown (.txt, .md)\n"
-                "• CSV files (.csv)\n"
-                "• Python scripts (.py)\n"
-                "• Excel files (.xlsx, .xls)"
-            ),
-            thread_ts=thread_ts,
-            user_id=user_id
+    # Download
+    resp = client.files_info(file=file_id)
+    file_info = resp["file"]
+    local_path = download_slack_file(client, file_info)
+
+    # If Excel, index per-row
+    if ext in ("xlsx", "xls"):
+        df = pd.read_excel(local_path)
+        THREAD_TABLE_DFS[thread] = df
+
+        docs = extract_excel_rows(local_path)
+        send_message(client, channel_id,
+                     f"⏳ Indexing {len(docs)} rows from *{file_name}*…",
+                     thread_ts=thread, user_id=user_id)
+        vs = THREAD_VECTOR_STORES.setdefault(
+            thread,
+            FaissVectorStore(
+                index_path=f"data/faiss_{thread}.index",
+                docstore_path=f"data/docstore_{thread}.pkl"
+            )
         )
+        threading.Thread(
+            target=index_in_background,
+            args=(vs, docs, client, channel_id, thread, user_id, file_name, real_team),
+            daemon=True,
+        ).start()
         return
 
-    try:
-        resp = client.files_info(file=file_id)
-        file_info = resp["file"]
-    except SlackApiError as e:
-        logger.error(f"files_info failed: {e.response['error']}")
-        return
-    
-    local_path = None
-    try:
-        local_path = download_slack_file(client, file_info)
-        raw_text = extract_text_from_file(local_path)
-    except Exception as e:
-        logger.exception(f"Error retrieving file {file_id}: {e}")
-        send_message(client, channel_id, f"❌ Failed to download *{file_info.get('name')}*: {e}", thread_ts=thread_ts, user_id=user_id)
-        return
-
-    if not raw_text.strip():
-        send_message(client, channel_id, f"⚠️ I couldn’t extract any text from *{file_info.get('name')}*.", thread_ts=thread_ts, user_id=user_id)
-        return
-
-    if thread_ts not in THREAD_VECTOR_STORES:
-        safe_thread = thread_ts.replace(".", "_")
-        THREAD_VECTOR_STORES[thread_ts] = FaissVectorStore(
-            index_path=f"data/faiss_{safe_thread}.index", docstore_path=f"data/docstore_{safe_thread}.pkl"
-        )
-    vs = THREAD_VECTOR_STORES[thread_ts]
-
+    # Fallback: extract full text and chunk
+    raw_text = extract_text_from_file(local_path)
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     chunks = splitter.split_text(raw_text)
-    docs = [Document(page_content=chunk, metadata={"file_name": file_info.get("name"), "file_id": file_id, "chunk_index": i}) for i, chunk in enumerate(chunks)]
+    docs = [Document(page_content=chunk, metadata={"file_name": file_name, "chunk_index": i})
+            for i, chunk in enumerate(chunks)]
 
-    send_message(client, channel_id, f"⏳ Received *{file_info.get('name')}*. Indexing now…", thread_ts=thread_ts, user_id=user_id)
-    logger.debug(f"Starting background indexing for team {real_team}")
-    threading.Thread(target=index_in_background, args=(vs, docs, client, channel_id, thread_ts, user_id, file_info.get("name"), real_team), daemon=True).start()
+    send_message(client, channel_id,
+                 f"⏳ Received *{file_name}*. Indexing now…",
+                 thread_ts=thread, user_id=user_id)
+    vs = THREAD_VECTOR_STORES.setdefault(
+        thread,
+        FaissVectorStore(
+            index_path=f"data/faiss_{thread}.index",
+            docstore_path=f"data/docstore_{thread}.pkl"
+        )
+    )
+    threading.Thread(
+        target=index_in_background,
+        args=(vs, docs, client, channel_id, thread, user_id, file_name, real_team),
+        daemon=True,
+    ).start()
+@app.message(re.compile(r"https?://\S+"))
+def handle_any_url_message(message, say, client, logger):
+    """
+    Trigger on any message containing an http(s):// URL.
+    """
+    user_id = message["user"]
+    text    = message["text"]
+    ch      = message["channel"]
+    thread  = message.get("thread_ts") or message["ts"]
+
+    # unwrap <https://…> to raw URL
+    normalized = re.sub(r"<(https?://[^>|]+)(?:\|[^>]+)?>", r"\1", text).strip()
+    url = normalized.split()[0]
+
+    # ensure vector store exists for this thread
+    if thread not in THREAD_VECTOR_STORES:
+        safe = thread.replace(".", "_")
+        THREAD_VECTOR_STORES[thread] = FaissVectorStore(
+            index_path=f"data/faiss_{safe}.index",
+            docstore_path=f"data/docstore_{safe}.pkl",
+        )
+    vs = THREAD_VECTOR_STORES[thread]
+
+    # kickoff crawl & index
+    send_message(client, ch,
+                 f":mag_right: Crawling & indexing <{url}> (root + 1 level)…",
+                 thread_ts=thread, user_id=user_id)
+
+    try:
+        count = crawl_and_index(url, vs)
+        if count:
+            send_message(client, ch,
+                         f":white_check_mark: Indexed *{count}* content chunks from <{url}>.\n"
+                         "_Tip: Ask follow-up questions as replies in this thread ⤵️_",
+                         thread_ts=thread, user_id=user_id)
+        else:
+            send_message(client, ch,
+                         f"⚠️ I couldn’t extract any text from <{url}>. "
+                         "Maybe it’s login-protected or loaded via JavaScript.",
+                         thread_ts=thread, user_id=user_id)
+    except Exception as e:
+        send_message(client, ch,
+                     f"❌ Failed to crawl <{url}>: {e}",
+                     thread_ts=thread, user_id=user_id)
+    # stop further fall-through
+    return
 # App mention handler: handles mentions and routes file uploads if present
 @app.event("message")
 def handle_direct_message(body,event, client: WebClient, logger):
@@ -732,16 +832,18 @@ def handle_direct_message(body,event, client: WebClient, logger):
     # hand off to your RAG/chat engine exactly as you do in handle_app_mention
     process_conversation(client, event, text)
 @app.event("app_mention")
-def handle_app_mention(event, say, client, logger):
+def handle_app_mention(body,event, say, client, logger):
     real_team = (
-        event.get("team")
-        or event.get("authorizations", [{}])[0].get("team")
+        event.get("source_team")
+        or event.get("user_team")
+        or event.get("team")
+        or body.get("team_id")
     )
     # 2) rebind your client
     client = get_client_for_team(real_team)
     # If a file is attached during the mention, treat it as file_share
     if event.get("files"):
-        return handle_file_share(event, client, logger)
+        return handle_file_share(body,event, client, logger)
     # Otherwise, normal conversation
     process_conversation(client, event, event.get("text", "").strip())
 
