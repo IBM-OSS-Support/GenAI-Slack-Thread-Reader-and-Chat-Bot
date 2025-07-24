@@ -732,16 +732,18 @@ def handle_direct_message(body,event, client: WebClient, logger):
     # hand off to your RAG/chat engine exactly as you do in handle_app_mention
     process_conversation(client, event, text)
 @app.event("app_mention")
-def handle_app_mention(event, say, client, logger):
+def handle_app_mention(body,event, say, client, logger):
     real_team = (
-        event.get("team")
-        or event.get("authorizations", [{}])[0].get("team")
+        event.get("source_team")
+        or event.get("user_team")
+        or event.get("team")
+        or body.get("team_id")
     )
     # 2) rebind your client
     client = get_client_for_team(real_team)
     # If a file is attached during the mention, treat it as file_share
     if event.get("files"):
-        return handle_file_share(event, client, logger)
+        return handle_file_share(body,event, client, logger)
     # Otherwise, normal conversation
     process_conversation(client, event, event.get("text", "").strip())
 
