@@ -15,8 +15,9 @@ from utils.thread_store import THREAD_VECTOR_STORES
 
 # ── LLM + PromptTemplate setup ────────────────────────────────────────────────
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
+OLLAMA_MODEL_NAME = os.getenv("OLLAMA_MODEL_NAME", "granite3.3:8b")
 llm = Ollama(
-    model="granite3.3:8b",
+    model=OLLAMA_MODEL_NAME,
     base_url=OLLAMA_BASE_URL,
     temperature=0.0,
 )
