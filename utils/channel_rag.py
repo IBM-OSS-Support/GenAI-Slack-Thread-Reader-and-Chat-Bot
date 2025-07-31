@@ -19,54 +19,57 @@ OLLAMA_MODEL_NAME = os.getenv("OLLAMA_MODEL_NAME", "granite3.3:8b")
 llm = Ollama(
     model=OLLAMA_MODEL_NAME,
     base_url=OLLAMA_BASE_URL,
-    temperature=0.0,
+    temperature=0,          # low temp → more deterministic
+        top_p=0.9,                # nucleus sampling
+        top_k=40,                 # restrict to the 40 highest-prob tokens
+        repeat_penalty=1.1,   # discourage repeats
+        num_predict=2048,       # enough to give a detailed answer
+        num_ctx=32768,
 )
 channel_prompt = PromptTemplate(
     input_variables=["messages"],
     template="""
-You are a Slack assistant summarizing internal support or escalation threads. Below is the full message thread with speakers and timestamps:
+You are a Slack assistant summarizing an internal support or escalation thread. Below is the full message history with speakers and timestamps:
 
 {messages}
 
-Your output must contain **exactly these five sections**, using **Slack markdown formatting** (asterisks for bold section titles, no bold in body). Do not add anything outside these sections. Do not add explanations.
-
+Produce *exactly five sections*, in this order, using Slack markdown with *bold section titles* (asterisks) and no other formatting:
 
 *Summary*  
-- Write **one clear sentence** summarizing the entire thread. Be specific about what triggered the thread (e.g., escalation, request, incident).
+- One clear sentence stating what triggered this thread (e.g., “An escalation opened due to Cognos performance degradation.”).
 
 *Business Impact*  
-- Only include bullets for impacts **explicitly mentioned in the thread**.  
-- Use the following bullet format:
-  - *Revenue at risk*: Describe risk to Watson or IBM revenue.
-  - *Operational impact*: Describe what is blocked or degraded.
-  - *Customer impact*: Describe how the customer is affected, including any leadership mention (e.g., CIO-level).
-  - *Team impact*: Mention any IBM team concerns, delays, or credibility issues.
-  - *Other impacts*: List any escalation triggers (e.g., Duty Manager contacted, credibility risk, etc.)
+- Only include bullets for impacts *explicitly mentioned* in the thread.  
+- Use *exactly* these labels (omit any not present):  
+  - *Revenue at risk*: …  
+  - *Operational impact*: …  
+  - *Customer impact*: …  
+  - *Team impact*: …  
+  - *Other impacts*: …  
+  - *Outstanding risks*: …  ← capture any remaining risks (e.g. missing logs, revenue still at risk)
 
 *Key Points Discussed*  
-- List  bullets summarizing specific events, facts, or updates.  
-- Focus on what was done, requested, stated, or observed.  
-- Use speaker names **only** if it clarifies the point.  
-- Do not add any information not present in the thread.
+- One bullet per distinct event, fact, request, or update from the thread.  
+- *Include*:  
+  - any *to-date fixes & effects* (what was changed, when, and what improvement was seen)  
+  - any *key metrics before/after* (CPU %, queue depths, job runtimes)  
+- Use speaker names *only* when needed for clarity.  
+- Do *not* add anything not present in the messages.
 
 *Decisions Made*  
-- List **all concrete decisions**, even logistical ones (like scheduling a call or taking ownership).  
-- Use this format:
-  - *@username* decided to ___ [DD/MM/YYYY HH:MM UTC]
+- List *all* concrete decisions (even logistical ones).  
+- *Include* any *next checkpoints* scheduled (date/time and responsible lead).  
+- Format each as:  
+  - *@username* decided to … [DD/MM/YYYY HH:MM UTC]
 
 *Action Items*  
-- List only *clearly stated follow-up actions* assigned to specific people.  
-- Use this format:
-  - *@username* to ___ [DD/MM/YYYY HH:MM UTC]  
-- Include due-dates only if explicitly mentioned. Do not guess or infer.
+- List only explicit follow‑up tasks assigned to someone.  
+- Format each as:  
+  - *@username* to … [DD/MM/YYYY HH:MM UTC]
 
----
-
-Strictly follow the format. Do **not invent** any bullet or timestamp. If something is missing, leave it out—do not assume.
-
+*Do not* invent any bullets, sections, or timestamps. If something isn’t in the thread, leave it out—do *not* guess.
 """
 )
-
 channel_summary_chain = LLMChain(llm=llm, prompt=channel_prompt)
 
 def analyze_entire_channel(

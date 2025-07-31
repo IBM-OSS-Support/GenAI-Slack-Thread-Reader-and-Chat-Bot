@@ -1,4 +1,5 @@
 # chains/analyze_thread.py
+from langchain.chains.summarize import load_summarize_chain
 
 import logging
 import time
@@ -27,7 +28,12 @@ OLLAMA_MODEL_NAME = os.getenv("OLLAMA_MODEL_NAME", "granite3.3:8b")
 llm = Ollama(
     model=OLLAMA_MODEL_NAME,
     base_url=OLLAMA_BASE_URL,
-    temperature=0.0,
+    temperature=0,          # low temp → more deterministic
+        top_p=0.9,                # nucleus sampling
+        top_k=40,                 # restrict to the 40 highest-prob tokens
+        repeat_penalty=1.1,   # discourage repeats
+        num_predict=512,       # enough to give a detailed answer
+        num_ctx=32768,
 )
 
 default_prompt = PromptTemplate(
@@ -37,7 +43,7 @@ You are a Slack assistant summarizing internal support or escalation threads. Be
 
 {messages}
 
-Your output must contain **exactly these five sections**, using **Slack markdown formatting** (asterisks for bold section titles, no bold in body). Do not add anything outside these sections. Do not add explanations.
+Your output must contain **exactly these five sections**, using **Slack markdown formatting** (asterisks for bold section titles, no bold in body). Do not add anything outside these sections. Do not add explanations. 
 
 
 *Summary*  
@@ -71,7 +77,7 @@ Your output must contain **exactly these five sections**, using **Slack markdown
 
 ---
 
-Strictly follow the format. Do **not invent** any bullet or timestamp. If something is missing, leave it out—do not assume.
+Strictly follow the format. Do **not invent** any bullet or timestamp. If something is missing, leave it out—do not assume. Format all of your output using Slack’s markup.
 
 """
 )

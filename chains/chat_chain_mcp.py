@@ -16,7 +16,12 @@ OLLAMA_MODEL_NAME = os.getenv("OLLAMA_MODEL_NAME", "granite3.3:8b")
 llm = Ollama(
     model=OLLAMA_MODEL_NAME,
     base_url=OLLAMA_BASE_URL,
-    temperature=0.0,
+    temperature=0.0,          # low temp → more deterministic
+         top_p=0.9,                # nucleus sampling
+        top_k=40,                 # restrict to the 40 highest-prob tokens
+        repeat_penalty=1.1,   # discourage repeats
+        num_predict=512,       # enough to give a detailed answer
+        num_ctx=32768,
 )
 
 prompt = PromptTemplate(
@@ -53,7 +58,7 @@ def process_message_mcp(human_input: str, thread_ts: str = "global") -> str:
 
     try:
         chain = LLMChain(llm=llm, prompt=prompt, memory=memory)
-        reply = chain.run(chat_history=chat_history, human_input=human_input)
+        reply = chain.run(human_input=human_input)
         return reply.strip()
     except Exception:
         logger.exception("Error processing message")

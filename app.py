@@ -98,6 +98,10 @@ app = App(
     authorize=custom_authorize,       # ← still do per-event auth here
 )
 
+def git_md_to_slack_md(text: str) -> str:
+    # **bold** → *bold*
+    return re.sub(r"\*\*(.+?)\*\*", r"*\1*", text)
+
 def get_client_for_team(team_id: str) -> WebClient:
     bot_token = TEAM_BOT_TOKENS.get(team_id)
     logging.debug(f"Getting client for team {team_id!r} with token {bot_token!r}")
@@ -260,6 +264,7 @@ def handle_export_pdf(ack, body, client, logger):
     # summary_md = body["message"]["text"]
     # summary_md = body["actions"][0]["value"]
     summary_md = body["message"]["blocks"][0]["text"]["text"]
+    summary_md = resolve_user_mentions(client, summary_md)
 
     
 
@@ -505,6 +510,8 @@ def process_conversation(client: WebClient, event, text: str):
         save_stats()
         try:
             summary = analyze_entire_channel(client, channel_id, thread).replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
+            summary = git_md_to_slack_md(summary)
+
             # out = resolve_user_mentions(client, summary)
             send_message(
                 client,
