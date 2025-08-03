@@ -23,7 +23,8 @@ def send_message(
         "Showcased creativity",
         "Positive attitude",
         "Attention to detail",
-        "Thorough explanation"
+        "Thorough explanation",
+        "Tell Us More"
     ]
 
     thumbs_down_feedback = [
@@ -32,7 +33,8 @@ def send_message(
         "Not helpful",
         "Not factually correct",
         "Didn't fully follow instructions",
-        "Refused when it shouldn't have"
+        "Refused when it shouldn't have",
+        "Tell Us More"
     ]
 
     thumbs = [

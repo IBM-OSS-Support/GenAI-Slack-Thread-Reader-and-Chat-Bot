@@ -24,14 +24,14 @@ from utils.slack_tools import get_user_name
 from utils.export_pdf import render_summary_to_pdf
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
-from utils.file_utils import download_slack_file, extract_text_from_file
+from utils.file_utils import download_slack_file, extract_text_from_file, extract_excel_as_table, dataframe_to_documents, answer_from_excel_super_dynamic
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
 from utils.vector_store import FaissVectorStore
 from utils.vector_store import FaissVectorStore
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
-from utils.thread_store import THREAD_VECTOR_STORES
+from utils.thread_store import THREAD_VECTOR_STORES, EXCEL_TABLES
 from chains.analyze_thread import translation_chain
 logging.basicConfig(level=logging.DEBUG)
 
@@ -110,30 +110,34 @@ def get_client_for_team(team_id: str) -> WebClient:
     return WebClient(token=bot_token)
 
 STATS_FILE = os.getenv("STATS_FILE", "/data/stats.json")
-def index_in_background(vs: FaissVectorStore, docs: list[Document],
-                        client: WebClient, channel_id: str,
-                        thread_ts: str, user_id: str, filename: str,real_team: str):
-    """
-    Run vs.add_documents(docs) in a separate thread. When done,
-    send a “finished indexing” message into the same thread.
-    """
-    # 2) rebind your client
+def index_in_background(vs, docs, client, channel_id, thread_ts, user_id, filename, real_team, ext=None):
+    from utils.thread_store import EXCEL_TABLES
     client = get_client_for_team(real_team)
     try:
-        # You can optionally log progress inside add_documents itself,
-        # but here we just call it and wait.
         vs.add_documents(docs)
 
-        # After indexing completes, send the follow-up message:
+        excel_info = ""
+        if ext in ("xlsx", "xls") and thread_ts in EXCEL_TABLES:
+            df = EXCEL_TABLES[thread_ts]
+            n_rows, n_cols = df.shape
+            sheet_name = getattr(df, 'sheet_name', 'Sheet1')
+            excel_info = (
+                f"\nSuccessfully loaded *{filename}*!\n\n"
+                f":gsheet: *{sheet_name}*: {n_rows} rows, {n_cols} columns\n\n"
+                f":mag: *Querying Tips:*\n"
+                "• Ask about people, roles, or departments\n"
+                "• Try queries like 'Who is X?', 'What is X's role?'\n"
+                "• Be specific and use exact names or titles"
+            )
+
         send_message(
             client,
             channel_id,
-            f"✅ Finished indexing *{filename}*. What would you like to know?",
+            f":checked: Finished indexing *{filename}*. What would you like to know?{excel_info}",
             thread_ts=thread_ts,
             user_id=user_id
         )
     except Exception as e:
-        # If something goes wrong, notify in thread:
         send_message(
             client,
             channel_id,
@@ -584,34 +588,71 @@ def process_conversation(client: WebClient, event, text: str):
                 thread_ts=thread, user_id=uid
             )
         return
+    
+# -------- Starts: Modified RAG Logic with Excel Table Lookup Handler --------
 
-    # ── Fallback chat with RAG lookup ──
-    # 1) Do a vector search only if FAISS index exists
-    final_input = normalized
-    vs = THREAD_VECTOR_STORES.get(thread)
-    if vs and vs.index is not None:
-        try:
-            retrieved_docs = vs.query(normalized, k=3)
-        except Exception:
-            retrieved_docs = []
+    # --- Excel Table Q&A ---
+    if thread in EXCEL_TABLES:
+        df = EXCEL_TABLES[thread]
+        answer = answer_from_excel_super_dynamic(df, normalized)
+        if answer:
+            reply = answer
+        else:
+            # Fallback to RAG/LLM as before
+            vs = THREAD_VECTOR_STORES[thread]
+            try:
+                retrieved_docs = vs.query(normalized, k=30)
+            except Exception:
+                retrieved_docs = []
+            if retrieved_docs:
+                context = "\n".join(doc.page_content for doc in retrieved_docs)
+                prompt = (
+                    f"You are a helpful data assistant. Here is data from an Excel table:\n"
+                    f"{context}\n\n"
+                    f"User question: {normalized}\n"
+                    "Only answer using the data above. If the answer is not present, say 'I can't find any match in the file.'"
+                )
+                reply = process_message_mcp(prompt, thread)
+            else:
+                reply = (
+                    "I can't find any match in the file, here is from my memory:\n\n"
+                    f"{process_message_mcp(normalized, thread)}"
+                )
 
-        if retrieved_docs:
-            rag_lines = []
-            for doc in retrieved_docs:
-                fname = doc.metadata.get("file_name", "unknown")
-                idx   = doc.metadata.get("chunk_index", 0)
-                snippet = doc.page_content.replace("\n", " ")[:300].strip()
-                rag_lines.append(f"File: *{fname}* (chunk {idx})\n```{snippet}...```")
+    else:
+        # --- Your existing RAG logic for other files ---
+        vs = THREAD_VECTOR_STORES.get(thread)
+        if vs and vs.index is not None:
+            try:
+                retrieved_docs = vs.query(normalized, k=3)
+            except Exception:
+                retrieved_docs = []
 
-            rag_context = "\n\n".join(rag_lines)
-            final_input = (
-                f"Here are relevant excerpts from the file uploaded in this thread:\n\n"
-                f"{rag_context}\n\nUser: {normalized}"
-            )
+            if retrieved_docs:
+                rag_lines = []
+                for doc in retrieved_docs:
+                    fname = doc.metadata.get("file_name", "unknown")
+                    idx   = doc.metadata.get("chunk_index", 0)
+                    snippet = doc.page_content.replace("\n", " ")[:300].strip()
+                    rag_lines.append(f"File: *{fname}* (chunk {idx})\n```{snippet}...```")
 
-    # 2️⃣ Pass the (possibly‐augmented) prompt into your existing chain
-    reply = process_message_mcp(final_input, thread)
+                rag_context = "\n\n".join(rag_lines)
+                final_input = (
+                    f"Here are relevant excerpts from the file uploaded in this thread:\n\n"
+                    f"{rag_context}\n\nUser: {normalized}"
+                )
+                reply = process_message_mcp(final_input, thread)
+            else:
+                reply = (
+                    "I can't find any match in that file, here is from my memory:\n\n"
+                    f"{process_message_mcp(normalized, thread)}"
+                )
+        else:
+            reply = process_message_mcp(normalized, thread)
+
+    #  reply for the excel table or RAG lookup
     if reply:
+        # Track usage and stats
         if not is_followup:
             USAGE_STATS["general_calls"] += 1
         else:
@@ -621,20 +662,21 @@ def process_conversation(client: WebClient, event, text: str):
                 USAGE_STATS["general_followups"] += 1
         save_stats()
 
-        # out = resolve_user_mentions(client, reply)
+        # sent the reply to the user
         send_message(
             client, ch, reply,
             thread_ts=thread, user_id=uid
         )
+# -------- Ends: Modified RAG Logic with Excel Table Lookup Handler --------
+
+# ── File share handler ──
 @app.event({"type": "message", "subtype": "file_share"})
 def handle_file_share(body, event, client: WebClient, logger):
     real_team = (
         body.get("team_id")
-        # fallback if you’re using authorizations array:
         or (body.get("authorizations") or [{}])[0].get("team_id")
     )
     logger.debug(f"Handling file share for team {real_team!r}")
-    # Rebind your client
     client = get_client_for_team(real_team)
     files = event.get("files", [])
     if not files:
@@ -646,7 +688,7 @@ def handle_file_share(body, event, client: WebClient, logger):
     file_name = file_obj.get("name", "")
     thread_ts = event.get("thread_ts") or event.get("ts")
 
-    # Check against supported extensions (added Excel support)
+    # Supported file types
     supported = {"pdf", "docx", "doc", "txt", "md", "csv", "py", "xlsx", "xls"}
     ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
     if ext not in supported:
@@ -668,40 +710,96 @@ def handle_file_share(body, event, client: WebClient, logger):
         )
         return
 
+    # --- Fetch file info from Slack ---
     try:
         resp = client.files_info(file=file_id)
         file_info = resp["file"]
     except SlackApiError as e:
         logger.error(f"files_info failed: {e.response['error']}")
         return
-    
-    local_path = None
+
+    # --- Send "Indexing now..." message immediately! ---
+    send_message(
+        client,
+        channel_id,
+        f":loadingcircle: Received *{file_info.get('name')}*. Indexing now…",
+        thread_ts=thread_ts,
+        user_id=user_id
+    )
+
+    # --- Download and process the file ---
     try:
         local_path = download_slack_file(client, file_info)
         raw_text = extract_text_from_file(local_path)
     except Exception as e:
         logger.exception(f"Error retrieving file {file_id}: {e}")
-        send_message(client, channel_id, f"❌ Failed to download *{file_info.get('name')}*: {e}", thread_ts=thread_ts, user_id=user_id)
+        send_message(
+            client, channel_id,
+            f"❌ Failed to download *{file_info.get('name')}*: {e}",
+            thread_ts=thread_ts, user_id=user_id
+        )
         return
 
+    # --- Excel-specific logic ---
+    if ext in ("xlsx", "xls"):
+        try:
+            df = extract_excel_as_table(local_path)
+            EXCEL_TABLES[thread_ts] = df
+            docs = dataframe_to_documents(df, file_name)
+            if thread_ts not in THREAD_VECTOR_STORES:
+                safe_thread = thread_ts.replace(".", "_")
+                THREAD_VECTOR_STORES[thread_ts] = FaissVectorStore(
+                    index_path=f"data/faiss_{safe_thread}.index",
+                    docstore_path=f"data/docstore_{safe_thread}.pkl"
+                )
+            vs = THREAD_VECTOR_STORES[thread_ts]
+            vs.add_documents(docs)
+        except Exception as e:
+            logger.exception(f"Error parsing Excel file {file_name}: {e}")
+            send_message(
+                client, channel_id,
+                f"❌ Failed to parse Excel file: {e}",
+                thread_ts=thread_ts, user_id=user_id
+            )
+
+    # --- For all files: fallback to text chunking for RAG ---
     if not raw_text.strip():
-        send_message(client, channel_id, f"⚠️ I couldn’t extract any text from *{file_info.get('name')}*.", thread_ts=thread_ts, user_id=user_id)
+        send_message(
+            client, channel_id,
+            f"⚠️ I couldn’t extract any text from *{file_info.get('name')}*.",
+            thread_ts=thread_ts, user_id=user_id
+        )
         return
 
     if thread_ts not in THREAD_VECTOR_STORES:
         safe_thread = thread_ts.replace(".", "_")
         THREAD_VECTOR_STORES[thread_ts] = FaissVectorStore(
-            index_path=f"data/faiss_{safe_thread}.index", docstore_path=f"data/docstore_{safe_thread}.pkl"
+            index_path=f"data/faiss_{safe_thread}.index",
+            docstore_path=f"data/docstore_{safe_thread}.pkl"
         )
     vs = THREAD_VECTOR_STORES[thread_ts]
 
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=5000, chunk_overlap=500)
     chunks = splitter.split_text(raw_text)
-    docs = [Document(page_content=chunk, metadata={"file_name": file_info.get("name"), "file_id": file_id, "chunk_index": i}) for i, chunk in enumerate(chunks)]
+    docs = [
+        Document(
+            page_content=chunk,
+            metadata={
+                "file_name": file_info.get("name"),
+                "file_id": file_id,
+                "chunk_index": i
+            }
+        )
+        for i, chunk in enumerate(chunks)
+    ]
 
-    send_message(client, channel_id, f"⏳ Received *{file_info.get('name')}*. Indexing now…", thread_ts=thread_ts, user_id=user_id)
     logger.debug(f"Starting background indexing for team {real_team}")
-    threading.Thread(target=index_in_background, args=(vs, docs, client, channel_id, thread_ts, user_id, file_info.get("name"), real_team), daemon=True).start()
+    threading.Thread(
+        target=index_in_background,
+        args=(vs, docs, client, channel_id, thread_ts, user_id, file_info.get("name"), real_team, ext),
+        daemon=True
+    ).start()
+
 # App mention handler: handles mentions and routes file uploads if present
 @app.event("message")
 def handle_direct_message(body,event, client: WebClient, logger):

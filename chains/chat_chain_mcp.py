@@ -9,7 +9,7 @@ from langchain.memory import ConversationBufferMemory
 logger = logging.getLogger(__name__)
 _TOKEN_RE = re.compile(r"<\|im_start\|>|\<\|im_sep\|>")
 
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_MODEL_NAME = os.getenv("OLLAMA_MODEL_NAME", "granite3.3:8b")
 
 # Initialize local Granite model

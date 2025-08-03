@@ -5,3 +5,4 @@ from utils.vector_store import FaissVectorStore
 
 # one store per Slack‐thread, shared everywhere
 THREAD_VECTOR_STORES: Dict[str, FaissVectorStore] = {}
+EXCEL_TABLES = {}  # thread_ts -> DataFrame
