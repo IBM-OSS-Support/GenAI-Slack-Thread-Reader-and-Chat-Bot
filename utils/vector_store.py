@@ -37,7 +37,6 @@ class FaissVectorStore:
             top_p=0.9,                # nucleus sampling
             top_k=40,                 # restrict to the 40 highest-prob tokens
             repeat_penalty=1.1,   # discourage repeats
-            num_predict=512,       # enough to give a detailed answer
             num_ctx=32768,
         )
 
