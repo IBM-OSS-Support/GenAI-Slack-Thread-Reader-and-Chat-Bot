@@ -33,6 +33,7 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
 from utils.thread_store import THREAD_VECTOR_STORES, EXCEL_TABLES
 from chains.analyze_thread import translation_chain
+from utils.health import health_app, run_health_server
 logging.basicConfig(level=logging.DEBUG)
 
 
@@ -851,4 +852,5 @@ def handle_app_mention(event, say, client, logger):
     process_conversation(client, event, event.get("text", "").strip())
 
 if __name__=="__main__":
+    threading.Thread(target=run_health_server, daemon=True).start()
     SocketModeHandler(app,SLACK_APP_TOKEN).start()
