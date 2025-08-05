@@ -1,7 +1,6 @@
 name: Slack Bot Health Check
 
 on:
-  workflow_dispatch:
   schedule:
     - cron: '*/1 * * * *'
 
