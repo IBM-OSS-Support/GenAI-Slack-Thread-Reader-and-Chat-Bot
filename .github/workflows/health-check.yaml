@@ -1,0 +1,45 @@
+name: Slack Bot Health Check
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/1 * * * *'
+
+jobs:
+  check:
+    # ↙️ Use your intranet runner here
+    runs-on: [self-hosted, intranet]
+
+    steps:
+      - name: Ping health endpoint
+        id: ping
+        run: |
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://276c18b48642.ngrok-free.app/health)
+          echo "status=$STATUS" >> $GITHUB_OUTPUT
+          if [[ "$STATUS" != "200" ]]; then
+            echo "🔴 Health check failed (status $STATUS)"
+            exit 1
+          fi
+
+      - name: Create GitHub issue on failure
+        if: failure()
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: "🔴 Health check FAILED: Slack Bot is down",
+              body:  `Health endpoint returned HTTP ${{ steps.ping.outputs.status }}.`,
+            })
+
+      - name: Notify Slack on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": ":rotating_light: *Health Check Failed*\nStatus: `${{ steps.ping.outputs.status }}`\nHost: `https://276c18b48642.ngrok-free.app:3001/health`"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
