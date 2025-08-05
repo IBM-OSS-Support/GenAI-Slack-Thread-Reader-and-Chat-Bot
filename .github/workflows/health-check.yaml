@@ -18,20 +18,6 @@ jobs:
             echo "🔴 Health check failed (status $STATUS)"
             exit 1
           fi
-
-      - name: Create GitHub issue on failure
-        if: failure()
-        uses: actions/github-script@v6
-        with:
-          script: |
-            // use the REST API client instead of the old github.issues
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo:  context.repo.repo,
-              title: "🔴 Health check FAILED: Slack Bot is down",
-              body:  `Health endpoint returned HTTP ${steps.ping.outputs.status}.`,
-            });
-
       - name: Notify Slack on failure
         if: failure()
         uses: slackapi/slack-github-action@v1
