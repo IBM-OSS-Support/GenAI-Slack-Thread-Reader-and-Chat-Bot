@@ -1,10 +1,11 @@
 name: Slack Bot Health Check
 on:
+  workflow_dispatch:
   schedule:
     - cron: '*/5 * * * *'
 jobs:
   check:
-    runs-on: [self-hosted, intranet]
+    runs-on: [self-hosted]
 
     steps:
       - name: Ping health endpoint
