@@ -1,0 +1,37 @@
+name: Slack Bot Health Check
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/5 * * * *'
+
+jobs:
+  check:
+    runs-on: [self-hosted]
+    env:
+      # set these two in Settings → Secrets → Actions
+      HEALTH_URL: ${{ secrets.HEALTH_URL }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+    steps:
+      - name: Ping health endpoint
+        id: ping
+        run: |
+          echo "Pinging $HEALTH_URL …"
+          STATUS=$(curl -k -s -o /dev/null -w "%{http_code}" "$HEALTH_URL")
+          echo "status=$STATUS" >> $GITHUB_OUTPUT
+          if [[ "$STATUS" != "200" ]]; then
+            echo "🔴 Health check failed (status $STATUS)"
+            exit 1
+          fi
+
+      - name: Notify Slack on failure
+        if: failure()
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": ":rotating_light: *Health Check Failed*\nURL: `${{ env.HEALTH_URL }}` returned status `${{ steps.ping.outputs.status }}`"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
