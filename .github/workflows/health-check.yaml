@@ -1,9 +1,7 @@
 name: Slack Bot Health Check
-
 on:
   schedule:
     - cron: '*/1 * * * *'
-
 jobs:
   check:
     runs-on: [self-hosted, intranet]
