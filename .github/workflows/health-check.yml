@@ -31,7 +31,7 @@ jobs:
         with:
           payload: |
             {
-              "text": ":rotating_light: *Health Check Failed*\nURL: `${{ env.HEALTH_URL }}` returned status `${{ steps.ping.outputs.status }}`"
+              "text": ":rotating_light: *Slack Bot Health Check Failed*\nStatus: `${{ steps.ping.outputs.status }}`\nURL: `${{ env.HEALTH_URL }}`\n\n:warning: The bot is not responding and may be down or unhealthy.\nPlease check the pod status in OpenShift or review logs."
             }
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
