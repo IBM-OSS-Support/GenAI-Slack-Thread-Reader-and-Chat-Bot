@@ -19,3 +19,5 @@ lxml>=4.9.0  # Optional but recommended parser for BeautifulSoup
 tabulate
 pandas
 flask
+asyncio
+dataclasses

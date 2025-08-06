@@ -34,8 +34,15 @@ from langchain.schema import Document
 from utils.thread_store import THREAD_VECTOR_STORES, EXCEL_TABLES
 from chains.analyze_thread import translation_chain
 from utils.health import health_app, run_health_server
+
 logging.basicConfig(level=logging.DEBUG)
 
+ENABLE_JIRA_FEATURES = os.getenv("ENABLE_JIRA_FEATURES", "false").lower() == "true"
+
+if ENABLE_JIRA_FEATURES:
+    logging.info("🎫 Jira integration enabled")
+else:
+    logging.info("🎫 Jira integration disabled")
 
 # Instantiate a single global vector store
 # THREAD_VECTOR_STORES: dict[str, FaissVectorStore] = {}
@@ -469,7 +476,8 @@ def process_conversation(client: WebClient, event, text: str):
             ":wave: Hello! Here's how you can use me:\n"
             "- Paste a Slack thread URL along with a keyword like 'analyze', 'summarize', or 'explain' to get a formatted summary of that thread.\n"
             "- Or simply mention me and ask any question to start a chat conversation.\n"
-            "- Reply inside a thread to continue the conversation with memory.",
+            "- Reply inside a thread to continue the conversation with memory.\n"
+            "- Ask me about Jira issues, projects, and tickets if Jira integration is enabled.",
             thread_ts=thread,
             user_id=uid,
         )
@@ -505,7 +513,7 @@ def process_conversation(client: WebClient, event, text: str):
             if not match:
                 send_message(
                     client, ch,
-                    f"❌ No channel named *{raw}* found. Use the channel’s real name (without ‘#’).",
+                    f"❌ No channel named *{raw}* found. Use the channel's real name (without '#').",
                     thread_ts=thread, user_id=uid
                 )
                 return
@@ -537,8 +545,8 @@ def process_conversation(client: WebClient, event, text: str):
         f"❌ *Failed to process channel* `{channel_id}`:\n"
         f">\n\n"
         "*🛠️ How to troubleshoot:*\n\n"
-        " 🔍 Make sure you’re in the *same workspace* as the channel you’re targeting.\n\n"
-        " 📨 If you’re DM’ing the bot, double-check you’ve selected the *correct workspace* from the app’s top menu.\n\n"
+        " 🔍 Make sure you're in the *same workspace* as the channel you're targeting.\n\n"
+        " 📨 If you're DM'ing the bot, double-check you've selected the *correct workspace* from the app's top menu.\n\n"
         " 🆔 Confirm the channel ID or name is *accurate* and the bot has been *invited*.\n\n"
         "If you still run into issues, please review your app configuration or contact your workspace admin."
     ),
@@ -589,6 +597,30 @@ def process_conversation(client: WebClient, event, text: str):
                 thread_ts=thread, user_id=uid
             )
         return
+
+    # NEW: Jira Query Processing (Synchronous Version)
+    if ENABLE_JIRA_FEATURES:
+        try:
+            jira_response = process_jira_query_sync(normalized)
+            if jira_response:
+                # Track usage as general call/followup
+                if not is_followup:
+                    USAGE_STATS["general_calls"] += 1
+                else:
+                    if thread in ANALYSIS_THREADS:
+                        USAGE_STATS["analyze_followups"] += 1
+                    else:
+                        USAGE_STATS["general_followups"] += 1
+                save_stats()
+                
+                # Send Jira response
+                send_message(
+                    client, ch, jira_response,
+                    thread_ts=thread, user_id=uid
+                )
+                return
+        except Exception as e:
+            logging.error(f"Jira processing error: {e}")
     
 # -------- Starts: Modified RAG Logic with Excel Table Lookup Handler --------
 
@@ -682,7 +714,6 @@ def handle_file_share(body, event, client: WebClient, logger):
     files = event.get("files", [])
     if not files:
         return
-    file_obj = files[0]
     file_id = file_obj["id"]
     channel_id = event["channel"]
     user_id = event.get("user")
@@ -697,7 +728,7 @@ def handle_file_share(body, event, client: WebClient, logger):
             client,
             channel_id,
             (
-                f"⚠️ Oops—I can’t handle *.{ext}* files yet. "
+                f"⚠️ Oops—I can't handle *.{ext}* files yet. "
                 "Right now I only support:\n"
                 "• PDF (.pdf)\n"
                 "• Word documents (.docx, .doc)\n"
@@ -767,7 +798,7 @@ def handle_file_share(body, event, client: WebClient, logger):
     if not raw_text.strip():
         send_message(
             client, channel_id,
-            f"⚠️ I couldn’t extract any text from *{file_info.get('name')}*.",
+            f"⚠️ I couldn't extract any text from *{file_info.get('name')}*.",
             thread_ts=thread_ts, user_id=user_id
         )
         return
@@ -803,7 +834,7 @@ def handle_file_share(body, event, client: WebClient, logger):
 
 # App mention handler: handles mentions and routes file uploads if present
 @app.event("message")
-def handle_direct_message(body,event, client: WebClient, logger):
+def handle_direct_message(body, event, client: WebClient, logger):
    # pick the real workspace:
     real_team = (
         event.get("source_team")
@@ -826,7 +857,7 @@ def handle_direct_message(body,event, client: WebClient, logger):
     user_id    = event["user"]
     thread_ts  = event.get("ts")
 
-    # if you want the “help on empty text” behavior:
+    # if you want the "help on empty text" behavior:
     if not text:
         send_message(
             client, channel_id,
@@ -835,8 +866,9 @@ def handle_direct_message(body,event, client: WebClient, logger):
         )
         return
 
-    # hand off to your RAG/chat engine exactly as you do in handle_app_mention
+    # hand off to your RAG/chat engine
     process_conversation(client, event, text)
+
 @app.event("app_mention")
 def handle_app_mention(event, say, client, logger):
     real_team = (
