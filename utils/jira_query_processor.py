@@ -1,12 +1,12 @@
-# utils/jira_query_processor.py
+# utils/jira_query_processor.py - ENHANCED VERSION with Comments Support
 
 import os
 import logging
 import re
 import requests
 import base64
-from typing import Optional, Dict, Any
-from datetime import datetime
+from typing import Optional, Dict, Any, List
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +75,12 @@ def call_jira_api(endpoint: str, params: Optional[Dict] = None) -> Optional[Dict
         
         if response.status_code == 200:
             return response.json()
+        elif response.status_code == 401:
+            logger.error("Jira API authentication failed - check your credentials")
+            return None
+        elif response.status_code == 403:
+            logger.error("Jira API access forbidden - check your permissions")
+            return None
         else:
             logger.error(f"Jira API error: {response.status_code} - {response.text}")
             return None
@@ -97,9 +103,45 @@ def get_jira_issue(issue_key: str) -> Optional[Dict[str, Any]]:
     """Get specific issue details"""
     return call_jira_api(f'issue/{issue_key}')
 
+def get_jira_issue_comments(issue_key: str) -> Optional[Dict[str, Any]]:
+    """Get comments for a specific issue"""
+    return call_jira_api(f'issue/{issue_key}/comment')
+
 def list_jira_projects() -> Optional[Dict[str, Any]]:
     """List available projects"""
     return call_jira_api('project')
+
+def parse_date_from_query(query: str) -> Optional[str]:
+    """Parse date-related terms from query and return JQL date string"""
+    query_lower = query.lower()
+    
+    # Common date patterns
+    if any(term in query_lower for term in ['last week', 'past week']):
+        date = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+        return f'created >= "{date}"'
+    elif any(term in query_lower for term in ['last month', 'past month']):
+        date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+        return f'created >= "{date}"'
+    elif any(term in query_lower for term in ['today']):
+        date = datetime.now().strftime('%Y-%m-%d')
+        return f'created >= "{date}"'
+    elif any(term in query_lower for term in ['yesterday']):
+        date = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+        return f'created >= "{date}" AND created < "{datetime.now().strftime("%Y-%m-%d")}"'
+    elif any(term in query_lower for term in ['this week']):
+        # Get start of this week (Monday)
+        today = datetime.now()
+        start_of_week = today - timedelta(days=today.weekday())
+        date = start_of_week.strftime('%Y-%m-%d')
+        return f'created >= "{date}"'
+    
+    # Check for specific year mentions
+    year_match = re.search(r'\b(20\d{2})\b', query)
+    if year_match:
+        year = year_match.group(1)
+        return f'created >= "{year}-01-01" AND created < "{int(year)+1}-01-01"'
+    
+    return None
 
 def format_jira_issues(issues_data: Dict[str, Any]) -> str:
     """Format Jira issues for Slack display"""
@@ -215,6 +257,61 @@ def format_jira_issue(issue_data: Dict[str, Any]) -> str:
     
     return formatted
 
+def format_jira_comments(comments_data: Dict[str, Any], issue_key: str) -> str:
+    """Format Jira issue comments for Slack display"""
+    if not comments_data or 'comments' not in comments_data:
+        return f"💬 *No comments found on {issue_key}*\n\nThis issue doesn't have any comments yet."
+    
+    comments = comments_data['comments']
+    total = len(comments)
+    
+    if not comments:
+        return f"💬 *No comments found on {issue_key}*\n\nThis issue doesn't have any comments yet."
+    
+    formatted = f"💬 *{total} comment{'s' if total != 1 else ''} on {issue_key}*\n\n"
+    
+    # Show up to 5 most recent comments
+    recent_comments = comments[-5:] if len(comments) > 5 else comments
+    
+    for i, comment in enumerate(recent_comments, 1):
+        author = comment.get('author', {}).get('displayName', 'Unknown')
+        created = comment.get('created', '')
+        body = comment.get('body', '')
+        
+        # Format creation date
+        try:
+            created_date = datetime.fromisoformat(created.replace('Z', '+00:00'))
+            date_str = created_date.strftime('%Y-%m-%d %H:%M')
+        except:
+            date_str = created
+        
+        formatted += f"**Comment {i}** by *{author}* on {date_str}:\n"
+        
+        # Extract text from comment body (handle ADF format)
+        if isinstance(body, dict):
+            comment_text = extract_text_from_adf(body)
+        elif isinstance(body, str):
+            comment_text = body
+        else:
+            comment_text = str(body)
+        
+        # Truncate long comments
+        if len(comment_text) > 300:
+            comment_text = comment_text[:300] + "..."
+        
+        formatted += f"💭 {comment_text}\n\n"
+    
+    if len(comments) > 5:
+        formatted += f"_... and {len(comments) - 5} earlier comment{'s' if len(comments) - 5 != 1 else ''}_\n\n"
+    
+    # Add Jira URL
+    host = os.getenv("ATLASSIAN_HOST", "")
+    if host:
+        jira_url = f"{host}/browse/{issue_key}"
+        formatted += f"🔗 <{jira_url}|View all comments in Jira>\n"
+    
+    return formatted
+
 def extract_text_from_adf(adf_content: Dict[str, Any]) -> str:
     """Extract plain text from Atlassian Document Format"""
     def extract_text_recursive(node):
@@ -278,8 +375,21 @@ def process_jira_query_sync(query: str) -> Optional[str]:
         logger.info(f"🎫 Processing Jira query: {query}")
         query_lower = query.lower()
         
+        # Extract issue key for comment queries
+        issue_key_match = re.search(r'([A-Z]+-\d+)', query)
+        
+        # Comments on specific issue
+        if issue_key_match and any(word in query_lower for word in ['comment', 'comments']):
+            issue_key = issue_key_match.group(1)
+            logger.debug(f"Fetching comments for issue: {issue_key}")
+            comments_data = get_jira_issue_comments(issue_key)
+            if comments_data is not None:
+                return format_jira_comments(comments_data, issue_key)
+            else:
+                return f"❌ *Error fetching comments for {issue_key}*\n\nCould not retrieve comments. Please check if the issue exists and you have permission to view it."
+        
         # List projects
-        if any(phrase in query_lower for phrase in ["list projects", "show projects", "available projects", "what projects"]):
+        elif any(phrase in query_lower for phrase in ["list projects", "show projects", "available projects", "what projects", "list my projects"]):
             logger.debug("Fetching Jira projects...")
             projects_data = list_jira_projects()
             if projects_data:
@@ -287,62 +397,99 @@ def process_jira_query_sync(query: str) -> Optional[str]:
             else:
                 return "❌ *Error fetching projects*\n\nCould not retrieve projects from Jira. Please check your connection and permissions."
         
-        # Issues assigned to me
-        elif any(phrase in query_lower for phrase in ["my issues", "issues assigned to me", "assigned to me"]):
+        # Issues assigned to me - ENHANCED: More comprehensive matching
+        elif any(phrase in query_lower for phrase in [
+            "my issues", "issues assigned to me", "assigned to me", "show my issues", 
+            "show my jira issues", "my jira issues", "issues i am assigned to",
+            "what are the issues i am assigned to", "what are my issues"
+        ]):
             logger.debug("Searching for assigned issues...")
-            jql = "assignee = currentUser() ORDER BY updated DESC"
+            
+            # Check for date filtering
+            date_filter = parse_date_from_query(query)
+            if date_filter:
+                jql = f"assignee = currentUser() AND {date_filter} ORDER BY updated DESC"
+            else:
+                jql = "assignee = currentUser() ORDER BY updated DESC"
+                
             issues_data = search_jira_issues(jql)
             if issues_data is not None:
                 return format_jira_issues(issues_data)
             else:
                 return "❌ *Error searching issues*\n\nCould not search for your assigned issues. Please check your Jira connection."
         
-        # Issues reported by me
-        elif any(phrase in query_lower for phrase in ["issues reported by me", "i reported", "my reported issues"]):
+        # Issues reported by me - ENHANCED
+        elif any(phrase in query_lower for phrase in [
+            "issues reported by me", "i reported", "my reported issues", "issues i reported",
+            "show issues reported by me", "show the jira issues reported by me"
+        ]):
             logger.debug("Searching for reported issues...")
-            jql = "reporter = currentUser() ORDER BY created DESC"
+            
+            # Check for date filtering
+            date_filter = parse_date_from_query(query)
+            if date_filter:
+                jql = f"reporter = currentUser() AND {date_filter} ORDER BY created DESC"
+            else:
+                jql = "reporter = currentUser() ORDER BY created DESC"
+                
             issues_data = search_jira_issues(jql)
             if issues_data is not None:
                 return format_jira_issues(issues_data)
             else:
                 return "❌ *Error searching issues*\n\nCould not search for issues you reported."
         
-        # Specific issue lookup
-        elif re.search(r'[A-Z]+-\d+', query):
-            issue_match = re.search(r'([A-Z]+-\d+)', query)
-            if issue_match:
-                issue_key = issue_match.group(1)
-                logger.debug(f"Fetching issue: {issue_key}")
-                issue_data = get_jira_issue(issue_key)
-                if issue_data:
-                    return format_jira_issue(issue_data)
-                else:
-                    return f"❌ *Issue {issue_key} not found*\n\nThe issue may not exist or you may not have permission to view it."
-        
-        # Open issues
+        # Open issues - ENHANCED
         elif any(phrase in query_lower for phrase in ["open issues", "active issues", "my open issues"]):
             logger.debug("Searching for open issues...")
-            jql = "assignee = currentUser() AND status != Done ORDER BY updated DESC"
+            
+            # Check for date filtering
+            date_filter = parse_date_from_query(query)
+            base_jql = "assignee = currentUser() AND status not in (Done, Closed, Resolved)"
+            if date_filter:
+                jql = f"{base_jql} AND {date_filter} ORDER BY updated DESC"
+            else:
+                jql = f"{base_jql} ORDER BY updated DESC"
+                
             issues_data = search_jira_issues(jql)
             if issues_data is not None:
                 return format_jira_issues(issues_data)
             else:
                 return "❌ *Error searching open issues*\n\nCould not search for open issues."
         
-        # Generic Jira query
-        elif is_jira_query(query):
-            return (
-                "🎫 *Jira Integration Active*\n\n"
-                "I can help you with Jira queries! Try asking:\n\n"
-                "• 'list my projects'\n"
-                "• 'show my issues'\n"
-                "• 'issues assigned to me'\n"
-                "• 'what is ABC-123?'\n"
-                "• 'my open issues'\n"
-                "• 'issues I reported'\n\n"
-                "💡 *Tip:* I can also look up specific issues by their key (e.g., PROJ-123)"
-            )
+        # Issues from specific time period
+        elif any(phrase in query_lower for phrase in [
+            "last week", "past week", "last month", "past month", "today", "yesterday", "this week"
+        ]) or re.search(r'\b20\d{2}\b', query):
+            logger.debug("Searching for issues by date...")
+            
+            date_filter = parse_date_from_query(query)
+            if date_filter:
+                # Determine if user wants assigned or reported issues
+                if any(word in query_lower for word in ["assigned", "my issues"]):
+                    jql = f"assignee = currentUser() AND {date_filter} ORDER BY updated DESC"
+                elif any(word in query_lower for word in ["reported", "i reported"]):
+                    jql = f"reporter = currentUser() AND {date_filter} ORDER BY created DESC"
+                else:
+                    # Default to both assigned and reported
+                    jql = f"(assignee = currentUser() OR reporter = currentUser()) AND {date_filter} ORDER BY updated DESC"
+                
+                issues_data = search_jira_issues(jql)
+                if issues_data is not None:
+                    return format_jira_issues(issues_data)
+                else:
+                    return "❌ *Error searching issues by date*\n\nCould not search for issues in the specified time period."
         
+        # Specific issue lookup (but not comments)
+        elif issue_key_match and not any(word in query_lower for word in ['comment', 'comments']):
+            issue_key = issue_key_match.group(1)
+            logger.debug(f"Fetching issue: {issue_key}")
+            issue_data = get_jira_issue(issue_key)
+            if issue_data:
+                return format_jira_issue(issue_data)
+            else:
+                return f"❌ *Issue {issue_key} not found*\n\nThe issue may not exist or you may not have permission to view it."
+        
+        # If we get here, it's a Jira query we don't specifically handle
         return None
         
     except Exception as e:

@@ -34,6 +34,8 @@ from langchain.schema import Document
 from utils.thread_store import THREAD_VECTOR_STORES, EXCEL_TABLES
 from chains.analyze_thread import translation_chain
 from utils.health import health_app, run_health_server
+from utils.jira_query_processor import process_jira_query_sync, is_jira_query
+from utils.jira_config import check_jira_configuration, get_jira_help_message
 
 logging.basicConfig(level=logging.DEBUG)
 
