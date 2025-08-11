@@ -34,8 +34,9 @@ from langchain.schema import Document
 from utils.thread_store import THREAD_VECTOR_STORES, EXCEL_TABLES
 from chains.analyze_thread import translation_chain
 from utils.health import health_app, run_health_server
-from utils.jira_query_processor import process_jira_query_sync, is_jira_query
+from utils.jira_query_processor import process_jira_query_sync, is_jira_query, process_jira_query_with_auth
 from utils.jira_config import check_jira_configuration, get_jira_help_message
+from utils.oauth_callback_server import start_oauth_server_thread
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -600,10 +601,21 @@ def process_conversation(client: WebClient, event, text: str):
             )
         return
 
-    # NEW: Jira Query Processing (Synchronous Version)
+    # NEW: Jira Query Processing with OAuth
     if ENABLE_JIRA_FEATURES:
         try:
-            jira_response = process_jira_query_sync(normalized)
+            # Get the team_id from the event or body
+            team_id = event.get('team') or event.get('source_team') or event.get('user_team')
+            
+            # Process with OAuth authentication
+            jira_response = process_jira_query_with_auth(
+                normalized,
+                user_id=uid,
+                team_id=team_id,
+                channel_id=ch,
+                thread_ts=thread
+            )
+            
             if jira_response:
                 # Track usage as general call/followup
                 if not is_followup:
@@ -887,4 +899,7 @@ def handle_app_mention(event, say, client, logger):
 
 if __name__=="__main__":
     threading.Thread(target=run_health_server, daemon=True).start()
+    # Start OAuth callback server if Jira is enabled
+    if ENABLE_JIRA_FEATURES:
+        start_oauth_server_thread()
     SocketModeHandler(app,SLACK_APP_TOKEN).start()
