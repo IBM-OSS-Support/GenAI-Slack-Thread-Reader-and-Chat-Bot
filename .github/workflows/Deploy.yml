@@ -1,18 +1,28 @@
-name: Build, Push & Deploy to OpenShift
+name: Build, Push & Deploy to OpenShift (on PR merge)
 
 on:
-  push:
+  pull_request:
     branches:
       - dev
       - main
-      - 'feature/auto-deployment'  
+      - feature/auto-deployment
+    types: [closed]
+
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   deploy:
-    runs-on: [self-hosted]  
+    if: github.event.pull_request.merged == true
+    runs-on: [self-hosted]
 
     env:
+      
       REGISTRY: ghcr.io
-
+      IMAGE_OWNER: ibm-oss-support        
+      IMAGE_NAME: slack-bot           
+   
     steps:
       - name: Clean workspace
         run: |
@@ -24,147 +34,123 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Determine branch (push)
-        id: br
+      # Decide which branch we DEPLOY FOR (base branch of the merged PR)
+      - name: Determine target branch & env
+        id: cfg
+        shell: bash
         run: |
-          # Works for push events
-          BRANCH="${GITHUB_REF_NAME:-${GITHUB_REF#refs/heads/}}"
-          echo "Branch: $BRANCH"
+          BRANCH="${{ github.event.pull_request.base.ref }}"
+          echo "Deploying for branch: $BRANCH"
+
+          case "$BRANCH" in
+            main)
+              NS="llm"
+              DEPLOY_DIR="deploy-prod"
+              VERSION_KEY="version_main"
+              ;;
+            dev|feature/auto-deployment)
+              NS=$([[ "$BRANCH" == "dev" ]] && echo "dev" || echo "test")
+              DEPLOY_DIR="deploy-dev"     # or set to deploy-test if you maintain separate files
+              VERSION_KEY="version_dev"
+              ;;
+            *)
+              echo "Unsupported base branch: $BRANCH"
+              exit 1
+              ;;
+          esac
+
+          echo "namespace=$NS" >> "$GITHUB_OUTPUT"
+          echo "deploy_dir=$DEPLOY_DIR" >> "$GITHUB_OUTPUT"
+          echo "version_key=$VERSION_KEY" >> "$GITHUB_OUTPUT"
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
 
-      - name: Extract version from version.txt
+      - name: Read version
         id: version
+        shell: bash
         run: |
-          BRANCH="${{ steps.br.outputs.branch }}"
-          MAIN_VERSION=$(grep "^version_main:" version.txt | awk '{print $2}')
-          DEV_VERSION=$(grep "^version_dev:" version.txt | awk '{print $2}')
-
-          if [ "$BRANCH" = "main" ]; then
-            VERSION="$MAIN_VERSION"
-          elif [ "$BRANCH" = "dev" ] || [ "$BRANCH" = "feature/auto-deployment" ]; then
-            VERSION="$DEV_VERSION"
-          else
-            echo "No version tagging needed for branch: $BRANCH"
-            echo "skip_deploy=true" >> "$GITHUB_OUTPUT"
-            exit 0
+          if [[ ! -f version.txt ]]; then
+            echo "version.txt not found"; exit 1
           fi
-
-          echo "Using version: $VERSION"
+          KEY="${{ steps.cfg.outputs.version_key }}"
+          VERSION=$(awk -v k="$KEY" '$1==k":" {print $2}' version.txt)
+          if [[ -z "$VERSION" ]]; then
+            echo "Could not read $KEY from version.txt"; exit 1
+          fi
           echo "tag=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "IMAGE_NAME=${{ env.REGISTRY }}/ibm-oss-support/slack-bot:$VERSION" >> "$GITHUB_ENV"
-
-      - name: Stop if skipping deploy
-        if: steps.version.outputs.skip_deploy == 'true'
-        run: echo "Skipping deploy for this branch."
+          echo "IMAGE_FULL=${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}:$VERSION" >> "$GITHUB_ENV"
+          echo "Building tag: $VERSION"
+          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}:$VERSION"
 
       - name: Write CA cert to file
-        if: steps.version.outputs.skip_deploy != 'true'
         run: printf '%s' "${{ secrets.OCP_CA_CERT }}" > /tmp/ca.crt
 
-      - name: Log in to OpenShift (token)
-        if: steps.version.outputs.skip_deploy != 'true'
+      - name: Log in to OpenShift
         run: |
           oc login \
             --server="${{ secrets.OCP_SERVER }}" \
             --token="${{ secrets.OCP_TOKEN }}" \
             --certificate-authority=/tmp/ca.crt
+          oc project "${{ steps.cfg.outputs.namespace }}"
 
-      - name: Login to registries (Podman)
-        if: steps.version.outputs.skip_deploy != 'true'
+      - name: Login to GHCR (Podman)
         run: |
-          # GHCR
           echo "${{ secrets.GHCR_PAT }}" | podman login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
-          # Optional: Docker Hub
-          if [ -n "${{ secrets.DOCKER_USERNAME }}" ]; then
-            echo "${{ secrets.DOCKER_PASSWORD }}" | podman login docker.io -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
-          fi
 
-      - name: Select namespace & deploy dir
-        if: steps.version.outputs.skip_deploy != 'true'
-        id: cfg
+      - name: Build image 
         run: |
-          BRANCH="${{ steps.br.outputs.branch }}"
-          if [ "$BRANCH" = "dev" ]; then
-            echo "namespace=dev" >> "$GITHUB_OUTPUT"
-            echo "deploy_dir=deploy-dev" >> "$GITHUB_OUTPUT"
-          elif [ "$BRANCH" = "main" ]; then
-            echo "namespace=llm" >> "$GITHUB_OUTPUT"
-            echo "deploy_dir=deploy-prod" >> "$GITHUB_OUTPUT"
-          elif [ "$BRANCH" = "feature/auto-deployment" ]; then
-            echo "namespace=test" >> "$GITHUB_OUTPUT"         # <- your test namespace
-            echo "deploy_dir=deploy-dev" >> "$GITHUB_OUTPUT"  # reuse dev manifests (or change to deploy-test)
-          else
-            echo "Unsupported branch: $BRANCH"
-            exit 1
-          fi
-
-      - name: Build image (Podman rootless)
-        if: steps.version.outputs.skip_deploy != 'true'
-        run: |
-          export BUILDAH_ISOLATION=chroot
-          podman build --pull=always -t "$IMAGE_NAME" . > /tmp/build.log 2>&1 || {
-            echo "Build failed:"
-            cat /tmp/build.log
-            exit 1
+         
+          podman build --pull=always -t "$IMAGE_FULL" . > /tmp/build.log 2>&1 || {
+            echo "Build failed:"; cat /tmp/build.log; exit 1;
           }
 
       - name: Push image
-        if: steps.version.outputs.skip_deploy != 'true'
         run: |
-          podman push "$IMAGE_NAME" >> /tmp/push.log 2>&1 || {
-            echo "Push failed"
-            cat /tmp/push.log
-            exit 1
+          podman push "$IMAGE_FULL" >> /tmp/push.log 2>&1 || {
+            echo "Push failed"; cat /tmp/push.log; exit 1;
           }
 
-      - name: Replace version in manifests
-        if: steps.version.outputs.skip_deploy != 'true'
+      - name: Replace tokens in manifests
         run: |
           cd "${{ steps.cfg.outputs.deploy_dir }}"
-          echo "Replacing __VERSION__ with '${{ steps.version.outputs.tag }}'..."
+          echo "Replacing __VERSION__ -> '${{ steps.version.outputs.tag }}'"
+          echo "Replacing __REGISTRY_PATH__ -> '${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}'"
+          # Linux vs macOS sed handling
           if sed --version >/dev/null 2>&1; then
-            find . -type f -name '*.yaml' -exec sed -i "s|__VERSION__|${{ steps.version.outputs.tag }}|g" {} +
+            find . -type f -name '*.yaml' -exec sed -i \
+              -e "s|__VERSION__|${{ steps.version.outputs.tag }}|g" \
+              -e "s|__REGISTRY_PATH__|${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}|g" {} +
           else
-            find . -type f -name '*.yaml' -exec sed -i '' "s|__VERSION__|${{ steps.version.outputs.tag }}|g" {} +
+            find . -type f -name '*.yaml' -exec sed -i '' \
+              -e "s|__VERSION__|${{ steps.version.outputs.tag }}|g" \
+              -e "s|__REGISTRY_PATH__|${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/${{ env.IMAGE_NAME }}|g" {} +
           fi
 
-      - name: Switch to namespace
-        if: steps.version.outputs.skip_deploy != 'true'
-        run: oc project "${{ steps.cfg.outputs.namespace }}"
-
-      - name: Validate manifests (dry-run)
-        if: steps.version.outputs.skip_deploy != 'true'
+      - name: Validate (dry-run)
         run: |
           cd "${{ steps.cfg.outputs.deploy_dir }}"
-          for file in *.yaml; do
-            echo "Validating $file"
-            oc apply --dry-run=client -f "$file" >> /tmp/deploy.log 2>&1 || {
-              echo "Validation failed: $file"
+          for f in *.yaml; do
+            echo "Validating $f"
+            oc apply --dry-run=client -f "$f" >> /tmp/deploy.log 2>&1 || {
+              echo "Validation failed: $f"
               cat /tmp/deploy.log
               exit 1
             }
           done
 
       - name: Apply manifests
-        if: steps.version.outputs.skip_deploy != 'true'
         run: |
-          echo "Applying manifests from ${{ steps.cfg.outputs.deploy_dir }}"
+          echo "Applying manifests in ${{ steps.cfg.outputs.deploy_dir }}"
           oc apply -f "${{ steps.cfg.outputs.deploy_dir }}" >> /tmp/deploy.log 2>&1 || {
             echo "Apply failed"
             cat /tmp/deploy.log
             exit 1
           }
 
-      - name: Restart and wait for rollout
-        if: steps.version.outputs.skip_deploy != 'true'
+      - name: Wait for rollout
         run: |
-          echo "Restarting deployment: slack-bot"
-          oc rollout restart deployment/slack-bot -n "${{ steps.cfg.outputs.namespace }}"
-          echo "Waiting for rollout to complete..."
+          # adjust 'slack-bot' if your Deployment metadata.name differs
           oc rollout status deployment/slack-bot -n "${{ steps.cfg.outputs.namespace }}" >> /tmp/rollout.log 2>&1 || {
-            echo "Rollout failed: slack-bot"
-            cat /tmp/rollout.log
-            exit 1
+            echo "Rollout failed"; cat /tmp/rollout.log; exit 1;
           }
 
       - name: Upload logs (always)
