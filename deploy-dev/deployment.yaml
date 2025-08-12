@@ -1,94 +1,112 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: slack-bot
-  namespace: dev
+  name: slack-bot-test
+  namespace: test
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: slack-bot
+      app: slack-bot-dev
   template:
     metadata:
       labels:
-        app: slack-bot
+        app: slack-bot-dev
     spec:
-      nodeSelector:
-        kubernetes.io/hostname: worker3.epgui.cp.fyre.ibm.com
+      securityContext:
+        fsGroup: 2000
+        runAsUser: 2000
       containers:
-        - name: slack-bot
-          image: ghcr.io/ibm-oss-support/slack-bot:__VERSION__
-          imagePullPolicy: Always
-          env:
-            - name: TEAM1_ID
-              valueFrom:
+      - name: slack-bot
+        image: ghcr.io/ibm-oss-support/slack-bot:__VERSION__
+        imagePullPolicy: Always
+        ports:
+          - containerPort: 3000   
+          - containerPort: 3001
+        env:
+          - name: TEAM1_ID
+            valueFrom:
                 secretKeyRef:
                   name: slack-secrets-dev
                   key: TEAM1_ID
-            - name: TEAM1_BOT_TOKEN
-              valueFrom:
+          - name: TEAM1_BOT_TOKEN
+            valueFrom:
                 secretKeyRef:
                   name: slack-secrets-dev
                   key: TEAM1_BOT_TOKEN
-            - name: TEAM2_ID
-              valueFrom:
+          - name: TEAM2_ID
+            valueFrom:
                 secretKeyRef:
                   name: slack-secrets-dev
                   key: TEAM2_ID
-            - name: TEAM2_BOT_TOKEN
-              valueFrom:
+          - name: TEAM2_BOT_TOKEN
+            valueFrom:
                 secretKeyRef:
                   name: slack-secrets-dev
                   key: TEAM2_BOT_TOKEN
-            - name: SLACK_APP_TOKEN
-              valueFrom:
+          - name: SLACK_APP_TOKEN
+            valueFrom:
                 secretKeyRef:
                   name: slack-secrets-dev
                   key: SLACK_APP_TOKEN
-            - name: SLACK_SIGNING_SECRET
-              valueFrom:
+          - name: SLACK_SIGNING_SECRET
+            valueFrom:
                 secretKeyRef:
                   name: slack-secrets-dev
                   key: SLACK_SIGNING_SECRET
-            - name: BOT_USER_ID
-              valueFrom:
+          - name: BOT_USER_ID
+            valueFrom:
                 secretKeyRef:
                   name: slack-secrets-dev
                   key: BOT_USER_ID
-            - name: OLLAMA_BASE_URL
-              valueFrom:
+          - name: OLLAMA_BASE_URL
+            valueFrom:
                 secretKeyRef:
                   name: slack-secrets-dev
                   key: OLLAMA_BASE_URL
-            - name: SESSION_EXPIRATION_SECONDS
-              valueFrom:
+          - name: SESSION_EXPIRATION_SECONDS
+            valueFrom:
                 secretKeyRef:
                   name: slack-secrets-dev
                   key: SESSION_EXPIRATION_SECONDS
-            - name: FORMATTED_CHANNELS
-              valueFrom:
+          - name: FORMATTED_CHANNELS
+            valueFrom:
                 secretKeyRef:
                   name: slack-secrets-dev
                   key: FORMATTED_CHANNELS
-            - name: STATS_FILE
-              valueFrom:
+          - name: STATS_FILE
+            valueFrom:
                 secretKeyRef:
                   name: slack-secrets-dev
                   key: STATS_FILE
-            - name: VECTOR_INDEX_PATH
-              valueFrom:
+          - name: VECTOR_INDEX_PATH
+            valueFrom:
                 secretKeyRef:
                   name: slack-secrets-dev
                   key: VECTOR_INDEX_PATH
-            - name: DOCSTORE_PATH
-              valueFrom:
+          - name: DOCSTORE_PATH
+            valueFrom:
                 secretKeyRef:
                   name: slack-secrets-dev
                   key: DOCSTORE_PATH
-          volumeMounts:
-            - name: stats-volume
-              mountPath: /app/data
-      volumes:
+          - name: HEALTH_PORT   
+            value: "3001"
+        volumeMounts:
         - name: stats-volume
-          persistentVolumeClaim:
-            claimName: bot-stats-pvc
+          mountPath: /app/data
+        livenessProbe:        
+          httpGet:
+            path: /health
+            port: 3001
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:       
+          httpGet:
+            path: /health
+            port: 3001
+          initialDelaySeconds: 2
+          periodSeconds: 5
+      volumes:
+      - name: stats-volume
+        persistentVolumeClaim:
+          claimName: oss-stats-pvc-test
