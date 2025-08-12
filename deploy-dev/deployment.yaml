@@ -7,11 +7,11 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      app: slack-bot-dev
+      app: slack-bot-test
   template:
     metadata:
       labels:
-        app: slack-bot-dev
+        app: slack-bot-test
     spec:
       securityContext:
         fsGroup: 2000
@@ -27,73 +27,70 @@ spec:
           - name: TEAM1_ID
             valueFrom:
                 secretKeyRef:
-                  name: slack-secrets-dev
+                  name: slack-secrets-test
                   key: TEAM1_ID
           - name: TEAM1_BOT_TOKEN
             valueFrom:
                 secretKeyRef:
-                  name: slack-secrets-dev
+                  name: slack-secrets-test
                   key: TEAM1_BOT_TOKEN
           - name: TEAM2_ID
             valueFrom:
                 secretKeyRef:
-                  name: slack-secrets-dev
+                  name: slack-secrets-test
                   key: TEAM2_ID
           - name: TEAM2_BOT_TOKEN
             valueFrom:
                 secretKeyRef:
-                  name: slack-secrets-dev
+                  name: slack-secrets-test
                   key: TEAM2_BOT_TOKEN
           - name: SLACK_APP_TOKEN
             valueFrom:
                 secretKeyRef:
-                  name: slack-secrets-dev
+                  name: slack-secrets-test
                   key: SLACK_APP_TOKEN
           - name: SLACK_SIGNING_SECRET
             valueFrom:
                 secretKeyRef:
-                  name: slack-secrets-dev
+                  name: slack-secrets-test
                   key: SLACK_SIGNING_SECRET
           - name: BOT_USER_ID
             valueFrom:
                 secretKeyRef:
-                  name: slack-secrets-dev
+                  name: slack-secrets-test
                   key: BOT_USER_ID
           - name: OLLAMA_BASE_URL
             valueFrom:
                 secretKeyRef:
-                  name: slack-secrets-dev
+                  name: slack-secrets-test
                   key: OLLAMA_BASE_URL
           - name: SESSION_EXPIRATION_SECONDS
             valueFrom:
                 secretKeyRef:
-                  name: slack-secrets-dev
+                  name: slack-secrets-test
                   key: SESSION_EXPIRATION_SECONDS
           - name: FORMATTED_CHANNELS
             valueFrom:
                 secretKeyRef:
-                  name: slack-secrets-dev
+                  name: slack-secrets-test
                   key: FORMATTED_CHANNELS
           - name: STATS_FILE
             valueFrom:
                 secretKeyRef:
-                  name: slack-secrets-dev
+                  name: slack-secrets-test
                   key: STATS_FILE
           - name: VECTOR_INDEX_PATH
             valueFrom:
                 secretKeyRef:
-                  name: slack-secrets-dev
+                  name: slack-secrets-test
                   key: VECTOR_INDEX_PATH
           - name: DOCSTORE_PATH
             valueFrom:
                 secretKeyRef:
-                  name: slack-secrets-dev
+                  name: slack-secrets-test
                   key: DOCSTORE_PATH
           - name: HEALTH_PORT   
             value: "3001"
-        volumeMounts:
-        - name: stats-volume
-          mountPath: /app/data
         livenessProbe:        
           httpGet:
             path: /health
@@ -106,7 +103,4 @@ spec:
             port: 3001
           initialDelaySeconds: 2
           periodSeconds: 5
-      volumes:
-      - name: stats-volume
-        persistentVolumeClaim:
-          claimName: oss-stats-pvc-test
+     
