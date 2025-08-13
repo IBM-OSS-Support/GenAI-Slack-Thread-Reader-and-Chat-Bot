@@ -3,7 +3,7 @@ name: Test Auto Deployment to OCP
 on:
   pull_request:
     branches:
-      - feature/auto-deployment
+      - feature/automatic-deployment
     types:
       - closed
 
