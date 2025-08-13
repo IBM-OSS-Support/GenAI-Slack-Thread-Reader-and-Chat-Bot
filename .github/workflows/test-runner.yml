@@ -1,4 +1,4 @@
-name: Verify runner = worker4
+name: Test Runner Connection
 
 on:
   push:
@@ -6,27 +6,13 @@ on:
       - test-deployment
 
 jobs:
-  verify-runner:
-    runs-on: worker4
-    timeout-minutes: 5
-
+  test-runner:
+    runs-on: self-hosted  
     steps:
       - name: Show runner info
         run: |
-          echo "runner.name   = ${{ runner.name }}"
-          echo "runner.os     = ${{ runner.os }}"
-          echo "runner.arch   = ${{ runner.arch }}"
-          echo "runner.labels = ${{ runner.labels }}"
-          echo "hostname      = $(hostname)"
-          echo "whoami        = $(whoami)"
+          echo "Runner name: ${{ runner.name }}"
+          echo "Runner OS: ${{ runner.os }}"
+          echo "Runner labels: ${{ runner.labels }}"
+          echo "Hostname: $(hostname)"
 
-      - name: Assert runner has 'worker4' label
-        run: |
-          echo "${{ runner.labels }}" | grep -qw worker4 || {
-            echo "::error::This runner does not have 'worker4' label. Labels: ${{ runner.labels }}"
-            exit 1
-          }
-
-      - name: Done
-        run: |
-          echo "Confirmed: running on a runner with label 'worker4'"
