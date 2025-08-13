@@ -1,39 +1,149 @@
-name: Test Auto Deployment to OCP
+name: Build, Push & Deploy to OpenShift
 
 on:
   pull_request:
     branches:
-      - feature/automatic-deployment
+      - feature/automatic-deployment 
     types:
       - closed
 
 jobs:
-  test-deploy:
-    if: github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'feature/auto-deployment'
-    runs-on: [self-hosted, intranet] # match your runner labels
+  deploy:
+    if: github.event.pull_request.merged == true
+    runs-on: [self-hosted]
+
+    env:
+      REGISTRY: ghcr.io
 
     steps:
-      - name: Show runner info
+      - name: Clean workspace
         run: |
-          echo "Running on: $(uname -a)"
-          echo "Runner labels: ${{ runner.labels }}"
+          echo "Cleaning workspace..."
+          rm -rf * .??* || true
+
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Extract version from version.txt
+        id: version
+        run: |
+          BRANCH="${GITHUB_REF#refs/heads/}"
+          echo "Branch: $BRANCH"
+
+          MAIN_VERSION=$(grep "^version_main:" version.txt | awk '{print $2}')
+          DEV_VERSION=$(grep "^version_dev:" version.txt | awk '{print $2}')
+
+          if [ "$BRANCH" = "main" ]; then
+            VERSION="$MAIN_VERSION"
+          elif [ "$BRANCH" = "feature/auto-deployment" ]; then
+            VERSION="$DEV_VERSION"
+          else
+            echo "No version tagging needed for branch: $BRANCH"
+            echo "skip_deploy=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Using version: $VERSION"
+          echo "tag=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "IMAGE_NAME=${{ env.REGISTRY }}/ibm-oss-support/slack-bot:$VERSION" >> "$GITHUB_ENV"
 
       - name: Write CA cert to file
         run: printf '%s' "${{ secrets.OCP_CA_CERT }}" > /tmp/ca.crt
 
       - name: Log in to OpenShift
         run: |
-          oc login \
-            --server="${{ secrets.OCP_SERVER }}" \
-            -u "${{ secrets.OCP_USERNAME }}" \
-            -p "${{ secrets.OCP_PASSWORD }}" \
-            --certificate-authority=/tmp/ca.crt
+          oc login --server=${{ secrets.OCP_SERVER }} \
+                   -u ${{ secrets.OCP_USERNAME }} \
+                   -p ${{ secrets.OCP_PASSWORD }} \
+                   --certificate-authority=/tmp/ca.crt
 
-      - name: Switch to test namespace
-        run: oc project test
+      - name: Login to registries
+        run: |
+          echo "${{ secrets.DOCKER_PASSWORD }}" | podman login docker.io -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+          echo "${{ secrets.GHCR_PAT }}" | podman login ghcr.io -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
 
-      - name: List pods in test namespace
-        run: oc get pods -n test
+      - name: Set config
+        id: config
+        run: |
+          BRANCH="${GITHUB_REF#refs/heads/}"
 
-      - name: Confirm deployment simulation
-        run: echo "✅ Auto-deployment workflow triggered successfully for feature/auto-deployment PR merge!"
+          if [ "$BRANCH" = "feature/auto-deployment" ]; then
+            echo "namespace=test" >> "$GITHUB_OUTPUT"
+            echo "deploy_dir=deploy-dev" >> "$GITHUB_OUTPUT"
+          elif [ "$BRANCH" = "main" ]; then
+            echo "namespace=test" >> "$GITHUB_OUTPUT"
+            echo "deploy_dir=deploy-prod" >> "$GITHUB_OUTPUT"
+          else
+            echo "Unsupported branch: $BRANCH"
+            exit 1
+          fi
+
+      - name: Build image
+        run: |
+          podman build -t $IMAGE_NAME . > /tmp/build.log 2>&1 || {
+            echo "Build failed:"
+            cat /tmp/build.log
+            exit 1
+          }
+
+      - name: Push image
+        run: |
+          podman push $IMAGE_NAME >> /tmp/push.log 2>&1 || {
+            echo "Push failed"
+            cat /tmp/push.log
+            exit 1
+          }
+
+      - name: Replace version in manifests
+        run: |
+          cd ${{ steps.config.outputs.deploy_dir }}
+          echo "Replacing __VERSION__ with '${{ steps.version.outputs.tag }}'..."
+          find . -type f -name '*.yaml' -exec sed -i "s|__VERSION__|${{ steps.version.outputs.tag }}|g" {} +
+
+      - name: Switch to namespace
+        run: |
+          oc project ${{ steps.config.outputs.namespace }}
+
+      - name: Validate manifests
+        run: |
+          cd ${{ steps.config.outputs.deploy_dir }}
+          for file in *.yaml; do
+            echo "Validating $file"
+            oc apply --dry-run=client -f "$file" >> /tmp/deploy.log 2>&1 || {
+              echo "Validation failed: $file"
+              cat /tmp/deploy.log
+              exit 1
+            }
+          done
+
+      - name: Apply manifests
+        run: |
+          echo "Applying manifests from ${{ steps.config.outputs.deploy_dir }}"
+          oc apply -f ${{ steps.config.outputs.deploy_dir }} >> /tmp/deploy.log 2>&1 || {
+            echo "Apply failed"
+            cat /tmp/deploy.log
+            exit 1
+          }
+
+      - name: Restart and wait for rollout
+        run: |
+          echo "Restarting deployment: slack-bot"
+          oc rollout restart deployment/slack-bot -n ${{ steps.config.outputs.namespace }}
+
+          echo "Waiting for rollout to complete..."
+          oc rollout status deployment/slack-bot -n ${{ steps.config.outputs.namespace }} >> /tmp/rollout.log 2>&1 || {
+            echo "Rollout failed: slack-bot"
+            cat /tmp/rollout.log
+            exit 1
+          }
+
+      - name: Upload logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-deploy-logs
+          path: |
+            /tmp/build.log
+            /tmp/push.log
+            /tmp/deploy.log
+            /tmp/rollout.log
