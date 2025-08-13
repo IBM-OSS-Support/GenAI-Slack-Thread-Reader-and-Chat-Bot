@@ -7,7 +7,7 @@ on:
 
 jobs:
   test-runner:
-    runs-on: worker4  
+    runs-on: worker-4  
     steps:
       - name: Show runner info
         run: |
