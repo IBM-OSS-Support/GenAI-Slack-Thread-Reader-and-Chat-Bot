@@ -10,7 +10,7 @@ on:
 jobs:
   deploy:
     if: github.event.pull_request.merged == true
-    runs-on: [self-hosted]
+    runs-on: [worker4]
 
     env:
       REGISTRY: ghcr.io
