@@ -3,7 +3,7 @@ name: Test Runner Connection
 on:
   push:
     branches:
-      - test-deployment
+      - feature/test-deployment
 
 jobs:
   test-runner:
