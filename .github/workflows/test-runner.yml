@@ -1,0 +1,28 @@
+name: Verify runner = worker4
+
+on:
+  push:
+    branches: [test-deployment]   
+
+jobs:
+  verify-runner:
+    runs-on: worker4               
+    timeout-minutes: 5
+
+    steps:
+      - name: Show runner info
+        run: |
+          echo "runner.name = ${{ runner.name }}"
+          echo "runner.os   = ${{ runner.os }}"
+          echo "runner.arch = ${{ runner.arch }}"
+          echo "runner.labels = ${{ runner.labels }}"
+          echo "hostname = $(hostname)"
+          echo "whoami   = $(whoami)"
+      - name: Assert we are on worker4
+        run: |
+          if [ "${{ runner.name }}" != "worker4" ]; then
+            echo "::error::This is running on '${{ runner.name }}', not 'worker4'."
+            exit 1
+          fi
+      - name: Done
+        run: echo "✅ Confirmed: running on worker4"
