@@ -25,4 +25,5 @@ jobs:
             exit 1
           fi
       - name: Done
-        run: echo "✅ Confirmed: running on worker4"
+        run: |
+          echo "✅ Confirmed: running on worker4"
