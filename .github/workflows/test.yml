@@ -6,7 +6,7 @@ on:
 
 jobs:
   verify-runner:
-    runs-on: worker4               
+    runs-on: [worker4]              
     timeout-minutes: 5
 
     steps:
