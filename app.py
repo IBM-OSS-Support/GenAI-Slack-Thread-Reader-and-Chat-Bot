@@ -851,6 +851,276 @@ def handle_app_mention(event, say, client, logger):
     # Otherwise, normal conversation
     process_conversation(client, event, event.get("text", "").strip())
 
+def do_analysis(event: dict, client: WebClient):
+    real_team = (
+        event.get("team")
+        or event.get("authorizations", [{}])[0].get("team")
+    )
+    process_conversation(client, event, event["text"])
+    # 2) rebind your client
+    client = get_client_for_team(real_team)
+    # If a file is attached during the mention, treat it as file_share
+    if event.get("files"):
+        return handle_file_share(event, client)
+    # Otherwise, normal conversation
+    process_conversation(client, event, event.get("text", "").strip())
+
+
+@app.action("select_channel_to_join")
+def handle_conversation_select(ack, body, client, logger):
+    
+    ack()
+
+    user_id = body["user"]["id"]
+    channel_id = body["actions"][0]["selected_conversation"]
+
+    try:
+        if channel_id.startswith("C"):
+            # Public channel → bot can join itself
+            client.conversations_join(channel=channel_id)
+
+        else:
+            # Private channel (ID starts with "G") → invite the bot user
+            bot_user_id = client.auth_test()["user_id"]
+            client.conversations_invite(
+                channel=channel_id,
+                users=bot_user_id
+            )
+
+        # Success message into that channel
+        client.chat_postMessage(
+            channel=channel_id,
+            text="👋 Thanks for adding me!"
+        )
+
+    except SlackApiError as e:
+        error_code = e.response["error"]
+        logger.error(f"couldn’t add me to {channel_id}: {error_code}")
+
+        # Let the user know in that same channel via ephemeral
+        # send the error as a DM to the user
+        client.chat_postMessage(
+    channel=user_id,
+    text=f":x: I wasn’t able to add me to <#{channel_id}>: `{error_code}`"
+)
+@app.action("analyze_button")
+def handle_analyze_button(ack, body, client, logger):
+    # 1️⃣ Acknowledge right away so Slack doesn’t complain
+    ack()
+
+    try:
+        # 2️⃣ Pull the selected channel ID from the conversations_select
+        state_values = body["view"]["state"]["values"]
+        channel_id   = state_values["channel_input"]["channel_select"]["selected_conversation"]
+
+        # 3️⃣ Build your “fake” message event to kick off the same analysis flow
+        action_ts = body["actions"][0]["action_ts"]
+        fake_event = {
+            "type":    "message",
+            "user":    body["user"]["id"],
+            "text":    f"analyze <#{channel_id}>",
+            "channel": body["user"]["id"],
+            "ts":      action_ts,
+        }
+
+        # 4️⃣ Hand it off to your unified analysis routine
+        do_analysis(fake_event, client)
+
+    except Exception as e:
+        logger.error(f"Error in analyze_button handler: {e}")
+        # (optional) notify the user:
+        client.chat_postMessage(
+            channel=body["user"]["id"],
+            text=":warning: Oops, something went wrong trying to analyze that channel."
+        )
+@app.event("app_home_opened")
+def update_home_tab(client, event, logger):
+    user_id = event["user"]
+    try:
+        client.views_publish(
+            user_id=user_id,
+            view={
+                "type": "home",
+                "callback_id": "home_view",
+                "blocks": [
+                    # Header
+                    {"type": "header", "text": {"type": "plain_text", "text": "🔎 Ask-Support-Bot", "emoji": True}},
+                    {"type": "divider"},
+
+                    # Welcome section
+                    {"type": "section", "text": {"type": "mrkdwn",
+                        "text": (
+                            "👋 *Welcome!* I'm your *Ask-Support-Bot*, here to help you with all your support needs."
+                        )
+                    }},
+                    {"type": "divider"},
+
+                    # How it works
+{"type": "section", "text": {"type": "mrkdwn",
+   "text": (
+       "*How it works:*\n\n"
+       "1️⃣  *Chat Method:* DM me with keywords like `analyze`, `explain`, or `summarize` followed by:\n\n"
+       "     • Thread URL for thread analysis\n\n"
+       "     • `#channel-name` for channel analysis\n\n"
+       "2️⃣  *App Home Method:* Use the forms below to paste URLs or select channels directly.\n\n"
+       "3️⃣  *Get Results:* Receive structured summaries in your DMs."
+   )
+}},
+                    {"type": "divider"},
+
+                    # Invite instructions
+                    {"type": "section", "block_id": "invite_info", "text": {"type": "mrkdwn",
+                        "text": (
+                            "*Invite me to a channel:*\n\n"
+                            "• *Public:* use the selector below.\n\n"
+                            "• *Private:* type `/invite @Botico` or mention me in the channel."
+                        )
+                    }},
+                    {"type": "divider"},
+
+                    # Public channel selector
+                    {"type": "section", "text": {"type": "mrkdwn",
+                        "text": "➕ *Add me to a public channel:*"
+                    }},
+                    {"type": "actions", "block_id": "public_invite", "elements": [
+                        {
+                            "type": "conversations_select",
+                            "action_id": "select_channel_to_join",
+                            "placeholder": {"type": "plain_text", "text": "Select a channel…", "emoji": True},
+                            "filter": {"include": ["public"]}
+                        }
+                    ]},
+                    {"type": "divider"},
+
+                    # Use Case: Analyze Thread
+                    {"type": "section", "block_id": "thread_section", "text": {"type": "mrkdwn",
+                        "text": (
+                            "*Use Case: Analyze a Thread*\n\n"
+                            "Paste a thread URL in the box below or mention me + URL, then click *Analyze Thread*."
+                        )
+                    }},
+                    {"type": "input", "block_id": "thread_input", "element": {
+                        "type": "plain_text_input",
+                        "action_id": "thread_url_input",
+                        "placeholder": {"type": "plain_text", "text": "Paste thread URL here..."}
+                    }, "label": {"type": "plain_text", "text": "Thread URL"}},
+                    {"type": "actions", "block_id": "thread_actions", "elements": [
+                        {"type": "button", "text": {"type": "plain_text", "text": "🚀 Analyze Thread"}, "style": "primary", "action_id": "analyze_thread_button"}
+                    ]},
+                    {"type": "divider"},
+
+                    # Use Case: Analyze Channel
+                    {"type": "section", "block_id": "channel_section", "text": {"type": "mrkdwn",
+                        "text": (
+                            "*Use Case: Analyze a Channel*\n\n"
+                            "Type `analyze #channel-name` in DM or select below, then click *Analyze Channel*."
+                        )
+                    }},
+                    {"type": "actions", "block_id": "channel_input_block", "elements": [
+                        {
+                            "type": "conversations_select",
+                            "action_id": "analyze_channel_select",
+                            "placeholder": {"type": "plain_text", "text": "Select a channel…"},
+                            "filter": {"include": ["public", "private"]}
+                        },
+                        {"type": "button", "text": {"type": "plain_text", "text": "🚀 Analyze Channel"}, "style": "primary", "action_id": "analyze_channel_button"}
+                    ]},
+                    {"type": "divider"},
+
+                    # Use Case: Document Q&A
+                    {"type": "section", "block_id": "file_section", "text": {"type": "mrkdwn",
+                        "text": (
+                            "*Use Case: Document Q&A*\n\n"
+                            "Upload PDF, TXT, CSV, or XLSX files in a DM.\n"
+                            "Start a thread and ask questions about the document contents."
+                        )
+                    }},
+        
+                    {"type": "divider"},
+
+                    # Use Case: General Q&A
+                    {"type": "section", "block_id": "general_section", "text": {"type": "mrkdwn",
+                        "text": (
+                            "*Use Case: General Q&A*\n\n"
+                            "Ask me anything in a DM or mention me in a channel.\n"
+                            "I'll respond based on my training and the latest data."
+                        )
+                    }},
+                    {"type": "divider"},
+
+                    # Features summary
+                    {"type": "section", "text": {"type": "mrkdwn",
+                        "text": (
+                            "*Features at a glance:*\n\n"
+                            "• Thread & channel summarization\n\n"
+                            "• PDF/TXT/CSV/XLSX parsing & Q&A\n\n"
+                            "• Multi-language translation\n\n"
+                            "• Export summaries as PDF\n\n"
+                            "• Instant chat responses"
+                        )
+                    }},
+                    {"type": "divider"},
+
+                    # Footer / Help
+                    # {"type": "context", "elements": [
+                    #     {"type": "mrkdwn", "text": (
+                    #         "💡 Need help? Type `help` in a DM or visit <https://example.com/docs|our docs>."
+                    #     )}
+                    # ]}
+                ]
+            }
+        )
+    except Exception as e:
+        logger.error(f"Failed to publish home tab for {user_id}: {e}")
+# Public invite handler remains the same
+@app.action("select_channel_to_join")
+# def handle_conversation_select(ack, body, client, logger):
+#     ack()
+#     user_id = body["user"]["id"]
+#     channel_id = body["actions"][0]["selected_conversation"]
+#     try:
+#         if channel_id.startswith("C"):
+#             client.conversations_join(channel=channel_id)
+#         else:
+#             bot_id = client.auth_test()["user_id"]
+#             client.conversations_invite(channel=channel_id, users=bot_id)
+#         client.chat_postMessage(channel=channel_id, text="👋 Hey! I’m here to help track tasks.")
+#         client.chat_postMessage(channel=user_id, text=f"✅ I’ve been added to <#{channel_id}>")
+#     except SlackApiError as e:
+#         logger.error(e)
+#         client.chat_postMessage(channel=user_id, text=f":x: Couldn’t add me: `{e.response['error']}`")
+
+# Analyze Thread button
+@app.action("analyze_thread_button")
+def handle_analyze_thread_button(ack, body, client, logger):
+    ack()
+    user = body["user"]["id"]
+    url = body["view"]["state"]["values"]["thread_input"]["thread_url_input"]["value"].strip()
+    m = re.search(r"https://[^/]+/archives/([^/]+)/p(\d+)", url)
+    if not m:
+        return client.chat_postMessage(channel=user, text=":x: Invalid thread URL.")
+    fake = {"type":"message","user":user,"text":url,"channel":user,"ts":body["actions"][0]["action_ts"]}
+    do_analysis(fake, client)
+
+# Analyze Channel button
+@app.action("analyze_channel_button")
+def handle_analyze_channel_button(ack, body, client, logger):
+    ack()
+    user = body["user"]["id"]
+    cid = body["view"]["state"]["values"]["channel_input_block"]["analyze_channel_select"]["selected_conversation"]
+    fake = {"type":"message","user":user,"text":f"analyze <#{cid}>","channel":user,"ts":body["actions"][0]["action_ts"]}
+    do_analysis(fake, client)
+
+@app.action("button_click")
+def handle_button_click(ack, body, client, logger):
+    ack()
+    user = body["user"]["id"]
+    try:
+        client.chat_postMessage(channel=user, text="You clicked the button! 🎉")
+    except Exception as e:
+        logger.error(f"Error responding to button click: {e}")
+
+
 if __name__=="__main__":
     threading.Thread(target=run_health_server, daemon=True).start()
     SocketModeHandler(app,SLACK_APP_TOKEN).start()
