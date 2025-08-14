@@ -13,6 +13,7 @@ from langchain_community.llms import Ollama
 from langchain.prompts import PromptTemplate
 from langchain.chains import LLMChain
 
+from chains.llm_provider import get_llm
 from utils.resolve_user_mentions import resolve_user_mentions
 from chains.chat_chain_mcp import process_message_mcp
 from utils.slack_tools import fetch_slack_thread, get_user_name
@@ -25,16 +26,7 @@ OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
 OLLAMA_MODEL_NAME = os.getenv("OLLAMA_MODEL_NAME", "granite3.3:8b")
 # Initialize the Ollama LLM
 
-llm = Ollama(
-    model=OLLAMA_MODEL_NAME,
-    base_url=OLLAMA_BASE_URL,
-    temperature=0,          # low temp → more deterministic
-        top_p=0.9,                # nucleus sampling
-        top_k=40,                 # restrict to the 40 highest-prob tokens
-        repeat_penalty=1.1,   # discourage repeats
-        num_predict=512,       # enough to give a detailed answer
-        num_ctx=32768,
-)
+llm = get_llm()
 
 default_prompt = PromptTemplate(
     input_variables=["messages"],

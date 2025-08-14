@@ -52,6 +52,111 @@ TEAM_BOT_TOKENS = {
 formatted = os.getenv("FORMATTED_CHANNELS", "")
 FORMATTED_CHANNELS = {ch.strip() for ch in formatted.split(",") if ch.strip()}
 logging.info(f"Formatted channels: {FORMATTED_CHANNELS}")
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi‑workspace router with automatic fallback
+# ─────────────────────────────────────────────────────────────────────────────
+class WorkspaceRouter:
+    def __init__(self, team_tokens: dict[str, str]):
+        # keep a stable default: first non-empty token found
+        self.team_tokens = {k: v for k, v in team_tokens.items() if k and v}
+        if not self.team_tokens:
+            raise RuntimeError("No workspace tokens configured!")
+        self.default_team_id = next(iter(self.team_tokens.keys()))
+        self._clients: dict[str, WebClient] = {}
+
+    def get_client(self, team_id: str | None) -> WebClient:
+        tid = team_id or self.default_team_id
+        tok = self.team_tokens.get(tid)
+        if not tok:
+            # fall back to default if unknown team id shows up
+            tid = self.default_team_id
+        if tid not in self._clients:
+            self._clients[tid] = WebClient(token=self.team_tokens[tid])
+        return self._clients[tid]
+
+    def iter_clients_with_priority(self, primary_team_id: str | None):
+        """Yield (team_id, client) starting with primary if present, then others."""
+        seen = set()
+        order = []
+        if primary_team_id and primary_team_id in self.team_tokens:
+            order.append(primary_team_id)
+            seen.add(primary_team_id)
+        # add the rest deterministically
+        for tid in self.team_tokens:
+            if tid not in seen:
+                order.append(tid)
+        for tid in order:
+            yield tid, self.get_client(tid)
+
+    # ------------- Helpers that try both workspaces automatically -------------
+    def find_channel_anywhere(self, raw: str) -> tuple[str, str] | None:
+        """
+        Accepts either a channel ID (Cxxxx) or a name (no '#').
+        Returns (team_id, channel_id) if found in any workspace.
+        """
+        if raw.startswith("C") and raw.isupper():
+            # It's an ID; try to locate which workspace has it
+            for tid, client in self.iter_clients_with_priority(None):
+                try:
+                    client.conversations_info(channel=raw)
+                    return tid, raw
+                except SlackApiError:
+                    continue
+            return None
+
+        # Lookup by name across workspaces
+        for tid, client in self.iter_clients_with_priority(None):
+            try:
+                cursor = None
+                while True:
+                    resp = client.conversations_list(
+                        types="public_channel,private_channel",
+                        limit=1000,
+                        cursor=cursor
+                    )
+                    for c in resp.get("channels", []):
+                        if c.get("name") == raw:
+                            return tid, c["id"]
+                    cursor = resp.get("response_metadata", {}).get("next_cursor")
+                    if not cursor:
+                        break
+            except SlackApiError:
+                continue
+        return None
+
+    def try_call(self, primary_team_id: str | None, func, *args, **kwargs):
+        """
+        Run a callable that takes a WebClient as first arg.
+        Try primary workspace first; on failure, try others.
+        Returns (team_id, result). Raises the last error if all fail.
+        """
+        last_exc = None
+        for tid, client in self.iter_clients_with_priority(primary_team_id):
+            try:
+                return tid, func(client, *args, **kwargs)
+            except SlackApiError as e:
+                last_exc = e
+            except Exception as e:
+                last_exc = e
+        if last_exc:
+            raise last_exc
+
+# Global router instance
+ROUTER = WorkspaceRouter(TEAM_BOT_TOKENS)
+
+def detect_real_team_from_event(body, event) -> str | None:
+    # best‑effort team detection
+    return (
+        (event or {}).get("team")
+        or (event or {}).get("source_team")
+        or (event or {}).get("user_team")
+        or (body or {}).get("team_id")
+        or (body.get("authorizations") or [{}])[0].get("team_id") if body else None
+    )
+
+def get_client_for_team(team_id: str | None) -> WebClient:
+    return ROUTER.get_client(team_id)
+
 # Ensure all required env vars exist
 for name in (
     "SLACK_APP_TOKEN",
@@ -103,12 +208,12 @@ def git_md_to_slack_md(text: str) -> str:
     # **bold** → *bold*
     return re.sub(r"\*\*(.+?)\*\*", r"*\1*", text)
 
-def get_client_for_team(team_id: str) -> WebClient:
-    bot_token = TEAM_BOT_TOKENS.get(team_id)
-    logging.debug(f"Getting client for team {team_id!r} with token {bot_token!r}")
-    if not bot_token:
-        raise RuntimeError(f"No token for team {team_id!r}")
-    return WebClient(token=bot_token)
+# def get_client_for_team(team_id: str) -> WebClient:
+#     bot_token = TEAM_BOT_TOKENS.get(team_id)
+#     logging.debug(f"Getting client for team {team_id!r} with token {bot_token!r}")
+#     if not bot_token:
+#         raise RuntimeError(f"No token for team {team_id!r}")
+#     return WebClient(token=bot_token)
 
 STATS_FILE = os.getenv("STATS_FILE", "/data/stats.json")
 def index_in_background(vs, docs, client, channel_id, thread_ts, user_id, filename, real_team, ext=None):
@@ -487,64 +592,62 @@ def process_conversation(client: WebClient, event, text: str):
 
     # Thread analysis
     m_ch = re.match(
-        r'^(?:analyze|analyse|summarize|summarise|explain)\s+<?#?([A-Za-z0-9_-]+)(?:\|[^>]*)?>?$',
-        normalized,
-        re.IGNORECASE
-    )
+    r'^(?:analyze|analyse|summarize|summarise|explain)\s+<?#?([A-Za-z0-9_-]+)(?:\|[^>]*)?>?$',
+    normalized,
+    re.IGNORECASE
+)
     if m_ch:
         raw = m_ch.group(1)
-        # raw could be an ID (starts with C…) or a name
-        if raw.startswith("C") and raw.isupper():
-            channel_id = raw
-        else:
-            # lookup by name
-            resp = client.conversations_list(types="public_channel,private_channel", limit=1000)
-            chans = resp.get("channels", [])
-            match = next((c for c in chans if c["name"] == raw), None)
-            logging.debug(f"Channel match: {match}")
-            if not match:
-                send_message(
-                    client, ch,
-                    f"❌ No channel named *{raw}* found. Use the channel’s real name (without ‘#’).",
-                    thread_ts=thread, user_id=uid
-                )
-                return
-            channel_id = match["id"]
+
+        # Try to locate the channel across BOTH workspaces
+        found = ROUTER.find_channel_anywhere(raw)
+        if not found:
+            send_message(
+                client, ch,
+                f"❌ No channel named or ID *{raw}* found in either workspace.",
+                thread_ts=thread, user_id=uid
+            )
+            return
+
+        target_team_id, channel_id = found
 
         USAGE_STATS["analyze_calls"] += 1
         save_stats()
-        try:
-            summary = analyze_entire_channel(client, channel_id, thread).replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
-            summary = git_md_to_slack_md(summary)
 
-            # out = resolve_user_mentions(client, summary)
+        # Run analysis using the correct workspace client
+        try:
+            target_client = get_client_for_team(target_team_id)
+            summary = analyze_entire_channel(target_client, channel_id, thread)\
+                .replace("[DD/MM/YYYY HH:MM UTC]", "")\
+                .replace("*@username*", "")\
+                .strip()
+            summary = git_md_to_slack_md(summary)
             send_message(
-                client,
-                ch,
+                get_client_for_team(target_team_id),  # send from that workspace
+                ch if ch.startswith("D") else ch,     # DM channel OK; if public, original ch
                 summary,
                 thread_ts=thread,
                 user_id=uid,
                 export_pdf=True
             )
             _get_memory(thread).save_context(
-                {"human_input": f"ANALYZE #{channel_id}"},
+                {"human_input": f"ANALYZE #{channel_id} (team {target_team_id})"},
                 {"output": summary}
             )
         except Exception as e:
             send_message(
                 client, ch,
                 (
-        f"❌ *Failed to process channel* `{channel_id}`:\n"
-        f">\n\n"
-        "*🛠️ How to troubleshoot:*\n\n"
-        " 🔍 Make sure you’re in the *same workspace* as the channel you’re targeting.\n\n"
-        " 📨 If you’re DM’ing the bot, double-check you’ve selected the *correct workspace* from the app’s top menu.\n\n"
-        " 🆔 Confirm the channel ID or name is *accurate* and the bot has been *invited*.\n\n"
-        "If you still run into issues, please review your app configuration or contact your workspace admin."
-    ),
+                    f"❌ *Failed to process channel* `{channel_id}` (team `{target_team_id}`):\n\n"
+                    f"`{e}`\n\n"
+                    "*Tips:*\n"
+                    "• Ensure the bot is invited to that channel in its workspace.\n"
+                    "• For private channels, invite the bot explicitly."
+                ),
                 thread_ts=thread, user_id=uid
             )
         return
+
     m = re.search(r"https://[^/]+/archives/([^/]+)/p(\d+)", normalized, re.IGNORECASE)
     if m:
         # if initial analysis → analyze_calls + track thread
@@ -563,29 +666,34 @@ def process_conversation(client: WebClient, event, text: str):
 
         try:
             export_pdf = False
-            if cid in FORMATTED_CHANNELS:
-                summary = analyze_slack_thread(client, cid, ts10,instructions=cmd, default=False).replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
-                export_pdf = True
-            else:
-                summary = analyze_slack_thread(client, cid, ts10, instructions=cmd, default=True).replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
 
-            # out = resolve_user_mentions(client, summary)
+            def _run(c: WebClient):
+                # choose default vs formatted based on your toggle
+                if cid in FORMATTED_CHANNELS:
+                    return analyze_slack_thread(c, cid, ts10, instructions=cmd, default=False)
+                return analyze_slack_thread(c, cid, ts10, instructions=cmd, default=True)
+
+            # Try primary team first, then the other workspace(s)
+            detected_team = detect_real_team_from_event(None, event)
+            target_team_id, summary = ROUTER.try_call(detected_team, _run)
+
+            summary = summary.replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
             send_message(
-                client,
-                ch,
+                get_client_for_team(target_team_id),
+                ch,  # reply in the same DM/thread the user is in
                 summary,
                 thread_ts=thread,
                 user_id=uid,
-                export_pdf=export_pdf
+                export_pdf=(cid in FORMATTED_CHANNELS)
             )
             _get_memory(thread).save_context(
-                {"human_input": f"{cmd.upper() or 'ANALYZE'} {ts10}"},
+                {"human_input": f"{cmd.upper() or 'ANALYZE'} {ts10} (team {target_team_id})"},
                 {"output": summary}
             )
         except Exception as e:
             send_message(
                 client, ch,
-                f"❌ Could not process thread: {e}",
+                f"❌ Could not process thread in either workspace: {e}",
                 thread_ts=thread, user_id=uid
             )
         return
@@ -673,10 +781,8 @@ def process_conversation(client: WebClient, event, text: str):
 # ── File share handler ──
 @app.event({"type": "message", "subtype": "file_share"})
 def handle_file_share(body, event, client: WebClient, logger):
-    real_team = (
-        body.get("team_id")
-        or (body.get("authorizations") or [{}])[0].get("team_id")
-    )
+    real_team = detect_real_team_from_event(body, event)
+
     logger.debug(f"Handling file share for team {real_team!r}")
     client = get_client_for_team(real_team)
     files = event.get("files", [])
@@ -805,12 +911,8 @@ def handle_file_share(body, event, client: WebClient, logger):
 @app.event("message")
 def handle_direct_message(body,event, client: WebClient, logger):
    # pick the real workspace:
-    real_team = (
-        event.get("source_team")
-        or event.get("user_team")
-        or event.get("team")
-        or body.get("team_id")
-    )
+    real_team = detect_real_team_from_event(body, event)
+
     client = get_client_for_team(real_team)
     # ignore messages with subtypes (e.g. file_share, bot_message, etc.)
     if event.get("subtype"):
@@ -838,11 +940,9 @@ def handle_direct_message(body,event, client: WebClient, logger):
     # hand off to your RAG/chat engine exactly as you do in handle_app_mention
     process_conversation(client, event, text)
 @app.event("app_mention")
-def handle_app_mention(event, say, client, logger):
-    real_team = (
-        event.get("team")
-        or event.get("authorizations", [{}])[0].get("team")
-    )
+def handle_app_mention(body,event, say, client, logger):
+    real_team = detect_real_team_from_event(body, event)
+
     # 2) rebind your client
     client = get_client_for_team(real_team)
     # If a file is attached during the mention, treat it as file_share
@@ -851,11 +951,9 @@ def handle_app_mention(event, say, client, logger):
     # Otherwise, normal conversation
     process_conversation(client, event, event.get("text", "").strip())
 
-def do_analysis(event: dict, client: WebClient):
-    real_team = (
-        event.get("team")
-        or event.get("authorizations", [{}])[0].get("team")
-    )
+def do_analysis(body,event: dict, client: WebClient):
+    real_team = detect_real_team_from_event(body, event)
+
     process_conversation(client, event, event["text"])
     # 2) rebind your client
     client = get_client_for_team(real_team)
