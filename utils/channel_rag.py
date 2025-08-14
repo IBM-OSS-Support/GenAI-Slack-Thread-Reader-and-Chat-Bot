@@ -24,11 +24,11 @@ from chains.llm_provider import get_llm
 # ─────────────────────────────────────────────────────────────────────────────
 logger = logging.getLogger("channel_analyzer")
 logger.setLevel(logging.INFO)
-if not any(isinstance(h, logging.FileHandler) for h in logger.handlers):
-    fh = logging.FileHandler("channel_analyzer.log", encoding="utf-8")
-    fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-    fh.setFormatter(fmt)
-    logger.addHandler(fh)
+# if not any(isinstance(h, logging.FileHandler) for h in logger.handlers):
+    # fh = logging.FileHandler("channel_analyzer.log", encoding="utf-8")
+    # fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    # fh.setFormatter(fmt)
+    # logger.addHandler(fh)
 
 @contextmanager
 def timed(step_name: str, extra: dict | None = None):
