@@ -1,11 +1,13 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: bot-stats-pvc
+  name: oss-stats-pvc
   namespace: dev
 spec:
   accessModes:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 1Gi
+      storage: 5Gi
+  volumeName: oss-static-pv-stats
+  storageClassName: ""  
