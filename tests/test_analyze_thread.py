@@ -1,79 +1,112 @@
-import sys, os
-# Ensure project root is on PYTHONPATH
-sys.path.insert(0, os.path.abspath(os.path.dirname(os.path.dirname(__file__))))
-
 import pytest
-import chains.analyze_thread as at
+from unittest.mock import MagicMock, patch
+from slack_sdk import WebClient
 
-@pytest.fixture(autouse=True)
-def clear_state(monkeypatch):
-    # Clear any previous monkeypatch state
-    # Reset summarizer and custom_chain to original
-    yield
+from chains.analyze_thread import analyze_slack_thread
 
+# Sample Slack thread messages
+sample_thread = [
+    {
+        "ts": "1690000000.000000",
+        "user": "U123456",
+        "text": "We have a problem with service X"
+    },
+    {
+        "ts": "1690000010.000000",
+        "user": "U234567",
+        "text": "Looking into it now."
+    }
+]
 
-def test_analyze_slack_thread_without_instructions(monkeypatch):
-    # Prepare dummy fetch_slack_thread
-    dummy_msgs = [
-        {"ts": "2.0", "user": "U2", "text": "second"},
-        {"ts": "1.0", "user": "U1", "text": "first"}
-    ]
-    monkeypatch.setattr(at, "fetch_slack_thread", lambda c, t: dummy_msgs)
+@pytest.fixture
+def mock_client():
+    return MagicMock(spec=WebClient)
 
-    # Stub summarizer chain at module level
-    class FakeSummarizer:
-        def run(self, **kwargs):
-            # Expect messages sorted
-            assert kwargs.get("messages") == "first\nsecond"
-            return "dummy summary"
-    monkeypatch.setattr(at, "summarizer", FakeSummarizer())
+@patch("chains.analyze_thread.fetch_slack_thread")
+@patch("chains.analyze_thread.get_user_name")
+@patch("chains.analyze_thread.resolve_user_mentions")
+@patch("chains.analyze_thread.LLMChain.run")
+def test_analyze_thread_default_summary(
+        mock_chain_run,
+        mock_resolve_mentions,
+        mock_get_user_name,
+        mock_fetch_thread,
+        mock_client
+):
+    # Arrange
+    mock_fetch_thread.return_value = sample_thread
+    mock_get_user_name.side_effect = lambda client, uid: {
+        "U123456": "alice",
+        "U234567": "bob"
+    }.get(uid, "unknown")
 
-    result = at.analyze_slack_thread("C1", "123456")
-    assert result == "dummy summary"
+    mock_resolve_mentions.return_value = (
+        "2023-07-21 12:00:00 @alice: We have a problem with service X\n"
+        "2023-07-21 12:00:10 @bob: Looking into it now."
+    )
 
+    mock_chain_run.return_value = "✅ Summary generated"
 
-def test_analyze_slack_thread_with_instructions(monkeypatch):
-    dummy_msgs = [{"ts": "1.0", "user": "U1", "text": "hello"}]
-    monkeypatch.setattr(at, "fetch_slack_thread", lambda c, t: dummy_msgs)
+    # Act
+    result = analyze_slack_thread(
+        client=mock_client,
+        channel_id="C123456",
+        thread_ts="1690000000.000000",
+        instructions="Summarize the thread",
+        default=True
+    )
 
-    # Stub custom_chain
-    class FakeCustom:
-        def run(self, **kwargs):
-            assert kwargs.get("messages") == "hello"
-            assert kwargs.get("instructions") == "Do X"
-            return "custom response"
-    monkeypatch.setattr(at, "custom_chain", FakeCustom())
+    # Assert
+    mock_fetch_thread.assert_called_once()
+    mock_get_user_name.assert_called()
+    mock_resolve_mentions.assert_called_once()
+    mock_chain_run.assert_called_once()
+    assert result == "✅ Summary generated"
 
-    result = at.analyze_slack_thread("C1", "123456", instructions="Do X")
-    assert result == "custom response"
+@patch("chains.analyze_thread.fetch_slack_thread")
+@patch("chains.analyze_thread.get_user_name")
+@patch("chains.analyze_thread.resolve_user_mentions")
+@patch("chains.analyze_thread.LLMChain.run")
+def test_analyze_thread_custom_summary(
+        mock_chain_run,
+        mock_resolve_mentions,
+        mock_get_user_name,
+        mock_fetch_thread,
+        mock_client
+):
+    # Arrange
+    mock_fetch_thread.return_value = sample_thread
+    mock_get_user_name.side_effect = lambda client, uid: {
+        "U123456": "alice",
+        "U234567": "bob"
+    }.get(uid, "unknown")
 
+    mock_resolve_mentions.return_value = (
+        "2023-07-21 12:00:00 @alice: We have a problem with service X\n"
+        "2023-07-21 12:00:10 @bob: Looking into it now."
+    )
 
-def test_retry_logic_on_transient_error(monkeypatch):
-    dummy_msgs = [{"ts": "1.0", "user": "U1", "text": "retry"}]
-    monkeypatch.setattr(at, "fetch_slack_thread", lambda c, t: dummy_msgs)
+    mock_chain_run.return_value = "✅ Custom instructions applied"
 
-    calls = {"count": 0}
-    class FlakySummary:
-        def run(self, **kwargs):
-            calls["count"] += 1
-            if calls["count"] == 1:
-                raise RuntimeError("transient error")
-            return "recovered"
-    monkeypatch.setattr(at, "summarizer", FlakySummary())
+    # Act
+    result = analyze_slack_thread(
+        client=mock_client,
+        channel_id="C123456",
+        thread_ts="1690000000.000000",
+        instructions="Translate this to French",
+        default=False
+    )
 
-    result = at.analyze_slack_thread("C1", "123456")
-    assert result == "recovered"
-    assert calls["count"] == 2
+    # Assert
+    mock_chain_run.assert_called_once()
+    assert result == "✅ Custom instructions applied"
 
-
-def test_retry_exhaustion_raises(monkeypatch):
-    dummy_msgs = [{"ts": "1.0", "user": "U1", "text": "fail"}]
-    monkeypatch.setattr(at, "fetch_slack_thread", lambda c, t: dummy_msgs)
-
-    class FailAlways:
-        def run(self, **kwargs):
-            raise RuntimeError("fatal")
-    monkeypatch.setattr(at, "summarizer", FailAlways())
-
-    with pytest.raises(RuntimeError):
-        at.analyze_slack_thread("C1", "123456")
+@patch("chains.analyze_thread.fetch_slack_thread", side_effect=Exception("API Error"))
+def test_fetch_thread_failure(mock_fetch_thread, mock_client):
+    with pytest.raises(RuntimeError) as exc:
+        analyze_slack_thread(
+            client=mock_client,
+            channel_id="C123456",
+            thread_ts="1690000000.000000"
+        )
+    assert "Error fetching thread" in str(exc.value)
