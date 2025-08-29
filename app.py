@@ -35,6 +35,7 @@ from utils.thread_store import THREAD_VECTOR_STORES, EXCEL_TABLES
 from chains.analyze_thread import translation_chain
 from utils.health import health_app, run_health_server
 logging.basicConfig(level=logging.DEBUG)
+from utils.db_utils import load_stats_from_db, save_stats_to_db
 
 
 # Instantiate a single global vector store
@@ -288,13 +289,44 @@ def handle_translate_click(ack, body, client, logger):
         None,
         False,  # NEW: allow PDF export of translations
     )
+
 def load_stats():
+    # Try to load from DB first
+    db_stats = load_stats_from_db()
+    print(f"db_stats = {db_stats}")
+    if db_stats:
+        # ... existing DB loading code WITHOUT _global_feedback_count ...
+        return {
+            "thumbs_up": db_stats["thumbs_up"],
+            "thumbs_down": db_stats["thumbs_down"],
+            "thumbs_up_log": db_stats.get("thumbs_up_log", {}),
+            "thumbs_down_log": db_stats.get("thumbs_down_log", {}),
+            "prev_thumbs_up": db_stats["prev_thumbs_up"],
+            "prev_thumbs_down": db_stats["prev_thumbs_down"],
+            "unique_users": set(range(db_stats["unique_user_count"])),
+            "total_calls": db_stats["total_calls"],
+            "analyze_calls": db_stats["analyze_calls"],
+            "analyze_followups": db_stats["analyze_followups"],
+            "general_calls": db_stats["general_calls"],
+            "general_followups": db_stats["general_followups"],
+            "pdf_exports": db_stats["pdf_exports"],
+            "feedback_up_reasons": db_stats.get("feedback_up_reasons", {}),
+            "feedback_down_reasons": db_stats.get("feedback_down_reasons", {}),
+            "custom_feedback": db_stats.get("custom_feedback", {})
+        }
+    
+    # Fallback to file if DB fails
     try:
         with open(STATS_FILE) as f:
             d = json.load(f)
+        
         return {
             "thumbs_up": d.get("thumbs_up", 0),
             "thumbs_down": d.get("thumbs_down", 0),
+            "thumbs_up_log": d.get("thumbs_up_log", {}),
+            "thumbs_down_log": d.get("thumbs_down_log", {}),
+            "prev_thumbs_up": d.get("prev_thumbs_up", 0),
+            "prev_thumbs_down": d.get("prev_thumbs_down", 0),
             "unique_users": set(range(d.get("unique_user_count", 0))),
             "total_calls": d.get("total_calls", 0),
             "analyze_calls": d.get("analyze_calls", 0),
@@ -302,11 +334,18 @@ def load_stats():
             "general_calls": d.get("general_calls", 0),
             "general_followups": d.get("general_followups", 0),
             "pdf_exports": d.get("pdf_exports", 0),
+            "feedback_up_reasons": d.get("feedback_up_reasons", {}),
+            "feedback_down_reasons": d.get("feedback_down_reasons", {}),
+            "custom_feedback": d.get("custom_feedback", {})
         }
     except:
         return {
             "thumbs_up": 0,
             "thumbs_down": 0,
+            "thumbs_up_log": {},
+            "thumbs_down_log": {},
+            "prev_thumbs_up": 0,
+            "prev_thumbs_down": 0,
             "unique_users": set(),
             "total_calls": 0,
             "analyze_calls": 0,
@@ -314,42 +353,98 @@ def load_stats():
             "general_calls": 0,
             "general_followups": 0,
             "pdf_exports": 0,
+            "feedback_up_reasons": {},
+            "feedback_down_reasons": {},
+            "custom_feedback": {}
         }
 
 def save_stats():
+    stats_dict = {
+        "prev_thumbs_up": _prev_vote_up_count,
+        "prev_thumbs_down": _prev_vote_down_count,
+        "thumbs_up": _vote_up_count,
+        "thumbs_up_log": thumbs_up_log,
+        "thumbs_down": _vote_down_count,
+        "thumbs_down_log": thumbs_down_log,
+        "unique_user_count": len(_unique_users),
+        "total_calls": USAGE_STATS["total_calls"],
+        "analyze_calls": USAGE_STATS["analyze_calls"],
+        "analyze_followups": USAGE_STATS["analyze_followups"],
+        "general_calls": USAGE_STATS["general_calls"],
+        "general_followups": USAGE_STATS["general_followups"],
+        "pdf_exports": USAGE_STATS["pdf_exports"],
+        "feedback_up_reasons": _vote_reasons.get("up", {}),
+        "feedback_down_reasons": _vote_reasons.get("down", {}),
+        "custom_feedback": _custom_feedback_log
+    }
+    
+    # Try to save to DB first (primary storage)
+    db_success = False
+    try:
+        db_success = save_stats_to_db(stats_dict)
+        if db_success:
+            print("✅ Stats saved to database successfully")
+        else:
+            print("❌ Failed to save stats to database")
+    except Exception as e:
+        print(f"❌ Database save error: {e}")
+    
+    # ALWAYS save to file as backup (secondary storage)
+    file_success = False
     try:
         os.makedirs(os.path.dirname(STATS_FILE), exist_ok=True)
         with open(STATS_FILE, "w") as f:
-            json.dump({
-                "thumbs_up": _vote_up_count,
-                "thumbs_down": _vote_down_count,
-                "unique_user_count": len(_unique_users),
-                "total_calls": USAGE_STATS["total_calls"],
-                "analyze_calls": USAGE_STATS["analyze_calls"],
-                "analyze_followups": USAGE_STATS["analyze_followups"],
-                "general_calls": USAGE_STATS["general_calls"],
-                "general_followups": USAGE_STATS["general_followups"],
-                "feedback_up_reasons": _vote_reasons.get("up", []),
-                "feedback_down_reasons": _vote_reasons.get("down", []),
-            }, f)
-    except:
-        logging.exception("Failed to save stats")
+            json.dump(stats_dict, f, indent=2)
+        file_success = True
+        print("✅ Stats saved to file successfully")
+    except Exception as e:
+        print(f"❌ File save error: {e}")
+    
+    # Log overall success
+    if db_success or file_success:
+        print(f"Stats saved successfully (DB: {db_success}, File: {file_success})")
+    else:
+        print("❌ Failed to save stats to both database and file")
 
-_stats           = load_stats()
-_unique_users    = _stats["unique_users"]
-_vote_up_count   = _stats["thumbs_up"]
-_vote_down_count = _stats["thumbs_down"]
+# —————————————————————————————————————————————
+# Global Variables
+
+_stats = load_stats()
+_unique_users = _stats["unique_users"]
+_vote_up_count = _stats.get("thumbs_up", 0)
+_vote_down_count = _stats.get("thumbs_down", 0)
+_prev_vote_up_count = _stats.get("prev_thumbs_up", 0)
+_prev_vote_down_count = _stats.get("prev_thumbs_down", 0)
+# Handle both list and dict formats for logs
+thumbs_up_log_data = _stats.get("thumbs_up_log", {})
+thumbs_down_log_data = _stats.get("thumbs_down_log", {})
+# Convert to dict if they're lists (for backward compatibility)
+if isinstance(thumbs_up_log_data, list):
+    thumbs_up_log = {}
+else:
+    thumbs_up_log = thumbs_up_log_data
+
+if isinstance(thumbs_down_log_data, list):
+    thumbs_down_log = {}
+else:
+    thumbs_down_log = thumbs_down_log_data
+
 _vote_reasons = {
     "up": _stats.get("feedback_up_reasons", {}) if isinstance(_stats.get("feedback_up_reasons"), dict) else {},
     "down": _stats.get("feedback_down_reasons", {}) if isinstance(_stats.get("feedback_down_reasons"), dict) else {}
 }
+_custom_feedback_log = _stats.get("custom_feedback", {}) if isinstance(_stats.get("custom_feedback"), dict) else {}
 _feedback_submissions = set()
+_feedback_text = "FEEDBACK"
+_pending_custom_feedback_users = {}  # message_ts -> user_number mapping
 
 _last_activity   = {}
 _active_sessions = {}
 _command_counts  = {}
 _vote_registry   = {}
 _already_warned  = {}
+
+# —————————————————————————————————————————————
 
 # —————————————————————————————————————————————
 # Usage Tracking
@@ -400,7 +495,9 @@ def handle_vote_down(ack, body, client):
 
 @app.action(re.compile(r"thumbs_up_feedback_select_\d+"))
 def handle_thumbs_up_feedback(ack, body, client):
-    global _vote_up_count, _vote_reasons, _feedback_submissions
+    global _vote_reasons, _feedback_submissions
+    global _prev_vote_up_count, thumbs_up_log, _pending_custom_feedback_users
+    global _vote_up_count, _last_used_counter
     ack()
 
     uid = body["user"]["id"]
@@ -411,40 +508,69 @@ def handle_thumbs_up_feedback(ack, body, client):
 
     if key in _feedback_submissions:
         client.chat_postMessage(
-            channel=ch,
-            thread_ts=ts,
+            channel=ch, thread_ts=ts,
             text=f"<@{uid}>, you've already submitted feedback for this message. ✅"
         )
         return
-    
-    # Generate timestamp
-    feedback_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
-     # Safe extraction of selected text
-    if "selected_option" in action:
-        selected_text = action["selected_option"]["text"]["text"]
-    elif "value" in action:
-        selected_text = action["value"]
-    elif "text" in action:
-        selected_text = action["text"]["text"]
-    else:
-        selected_text = "Unknown feedback"
-
-    _vote_up_count += 1
-    _vote_reasons.setdefault("up", {})[feedback_time] = selected_text
-    _feedback_submissions.add(key)
-    save_stats()
-
-    client.chat_postMessage(
-        channel=ch,
-        thread_ts=ts,
-        text=f"<@{uid}>, Thank you for your honest feedback ❤️"
+    now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    selected_text = (
+        action.get("selected_option", {}).get("text", {}).get("text") or
+        action.get("value") or
+        action.get("text", {}).get("text") or
+        "Unknown"
     )
+
+    # Update global counter and track which counter was last used
+    _last_used_counter = "up"  # Track that thumbs up was last used
+    _prev_vote_up_count = _vote_up_count
+    _vote_up_count += 1
+    current_user_number = _vote_up_count
+    
+    # Store User entry with the current count
+    thumbs_up_log[f"User-{current_user_number}"] = {
+        "TimeStamp": now,
+        "user_count": current_user_number,
+        "message_ts": ts
+    }
+
+    # ONLY save the feedback reason if it's NOT "Tell Us More"
+    if selected_text != "Tell Us More":
+        _vote_reasons.setdefault("up", {})[f"User-{current_user_number}"] = {
+            "TimeStamp": now,
+            "feedback_text": selected_text,
+            "message_ts": ts
+        }
+        save_stats()
+        client.chat_postMessage(
+            channel=ch, 
+            thread_ts=ts,
+            text=f"<@{uid}>, Thank you for your honest feedback ❤️"
+        )
+    else:
+        # Track this message for custom feedback with the same user number
+        _pending_custom_feedback_users[ts] = current_user_number
+        bot_name = os.getenv("BOT_NAME", "Ask-Support")
+        save_stats()
+        client.chat_postMessage(
+            channel=ch,
+            thread_ts=ts,
+            text=(
+                f"<@{uid}>, please provide your custom feedback using:\n\n"
+                f"`@{bot_name} {_feedback_text} Your feedback text here`"
+            )
+        )
+
+    _feedback_submissions.add(key)
 
 @app.action(re.compile(r"thumbs_down_feedback_select_\d+"))
 def handle_thumbs_down_feedback(ack, body, client):
-    global _vote_down_count, _vote_reasons, _feedback_submissions
+    global _vote_reasons, _feedback_submissions
+    global _prev_vote_down_count, thumbs_down_log, _pending_custom_feedback_users
+    global _vote_down_count, _last_used_counter
+    global _prev_vote_up_count, _vote_up_count
     ack()
+
     uid = body["user"]["id"]
     ts = body["message"]["ts"]
     ch = body["channel"]["id"]
@@ -453,51 +579,82 @@ def handle_thumbs_down_feedback(ack, body, client):
 
     if key in _feedback_submissions:
         client.chat_postMessage(
-            channel=ch,
-            thread_ts=ts,
+            channel=ch, thread_ts=ts,
             text=f"<@{uid}>, you've already submitted feedback for this message. ✅"
         )
         return
 
-    # Generate timestamp
-    feedback_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-
-    # Safe extraction of selected text
-    if "selected_option" in action:
-        selected_text = action["selected_option"]["text"]["text"]
-    elif "value" in action:
-        selected_text = action["value"]
-    elif "text" in action:
-        selected_text = action["text"]["text"]
-    else:
-        selected_text = "Unknown feedback"
-
-    _vote_down_count += 1
-    _vote_reasons.setdefault("down", {})[feedback_time] = selected_text
-    _feedback_submissions.add(key)
-    save_stats()
-
-    client.chat_postMessage(
-        channel=ch,
-        thread_ts=ts,
-        text=f"<@{uid}>, Thank you for your honest feedback ❤️"
+    now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    selected_text = (
+        action.get("selected_option", {}).get("text", {}).get("text") or
+        action.get("value") or
+        action.get("text", {}).get("text") or
+        "Unknown"
     )
 
+    # Update global counter and track which counter was last used
+    _last_used_counter = "down"  # Track that thumbs down was last used
+    _prev_vote_down_count = _vote_down_count
+    _vote_down_count += 1
+    current_user_number = _vote_down_count
+    
+    # Store User entry with the current count
+    thumbs_down_log[f"User-{current_user_number}"] = {
+        "TimeStamp": now,
+        "user_count": current_user_number,
+        "message_ts": ts
+    }
+
+    # ONLY save the feedback reason if it's NOT "Tell Us More"
+    if selected_text != "Tell Us More":
+        _vote_reasons.setdefault("down", {})[f"User-{current_user_number}"] = {
+            "TimeStamp": now,
+            "feedback_text": selected_text,
+            "message_ts": ts
+        }
+        save_stats()
+        client.chat_postMessage(
+            channel=ch, 
+            thread_ts=ts,
+            text=f"<@{uid}>, Thank you for your honest feedback ❤️"
+        )
+    else:
+        # Track this message for custom feedback with the same user number
+        _pending_custom_feedback_users[ts] = current_user_number
+        bot_name = os.getenv("BOT_NAME", "Ask-Support")
+        save_stats()
+        client.chat_postMessage(
+            channel=ch,
+            thread_ts=ts,
+            text=(
+                f"<@{uid}>, please provide your custom feedback using:\n\n"
+                f"`@{bot_name} {_feedback_text} Your feedback text here`"
+            )
+        )
+
+    _feedback_submissions.add(key)
+
 def _handle_vote(body, client, vote_type, emoji):
-    global _vote_up_count, _vote_down_count
-    uid  = body["user"]["id"]
-    ts   = body["message"]["ts"]
-    ch   = body["channel"]["id"]
-    _vote_registry.setdefault(ts,set())
-    _already_warned.setdefault(ts,set())
+    global _vote_up_count, _vote_down_count, thumbs_up_log, thumbs_down_log
+    global _prev_vote_up_count, _prev_vote_down_count, _last_used_counter  # Add _last_used_counter
+    
+    uid = body["user"]["id"]
+    ts  = body["message"]["ts"]
+    ch  = body["channel"]["id"]
+    now = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+
+    _vote_registry.setdefault(ts, set())
+    _already_warned.setdefault(ts, set())
+
     if uid in _vote_registry[ts]:
         if uid not in _already_warned[ts]:
             client.chat_postMessage(channel=ch, thread_ts=ts,
-                                    text=f"<@{uid}> you've already voted ✅")
+            text=f"<@{uid}> you've already voted ✅")
             _already_warned[ts].add(uid)
         return
+
     _vote_registry[ts].add(uid)
-    
+
     send_message(
         client, ch,
         "Thanks for the 👍!" if vote_type == "up" else "Sorry to hear that 👎",
@@ -506,10 +663,28 @@ def _handle_vote(body, client, vote_type, emoji):
         show_thumbs_down_feedback=(vote_type == "down")
     )
 
-    if vote_type=="up": 
-        _vote_up_count+=1
-    else: 
-        _vote_down_count+=1
+    # Track which counter was last used and update counts
+    if vote_type == "up":
+        _last_used_counter = "up"  # Track that thumbs up was last used
+        _prev_vote_up_count = _vote_up_count
+        _vote_up_count += 1
+        current_user_number = _vote_up_count
+        thumbs_up_log[f"User-{current_user_number}"] = {
+            "TimeStamp": now,
+            "user_count": current_user_number,
+            "message_ts": ts
+        }
+    else:
+        _last_used_counter = "down"  # Track that thumbs down was last used
+        _prev_vote_down_count = _vote_down_count
+        _vote_down_count += 1
+        current_user_number = _vote_down_count
+        thumbs_down_log[f"User-{current_user_number}"] = {
+            "TimeStamp": now,
+            "user_count": current_user_number,
+            "message_ts": ts
+        }
+
     save_stats()
 
 def track_usage(uid, thread_ts, cmd=None):
@@ -533,6 +708,10 @@ def get_bot_stats():
     )
 
 def process_conversation(client: WebClient, event, text: str):
+    global _pending_custom_feedback_users, _custom_feedback_log
+    global _vote_up_count, _vote_down_count, _last_used_counter
+    global _prev_vote_up_count, _prev_vote_down_count
+    
     ch      = event["channel"]
     ts      = event["ts"]
     thread  = event.get("thread_ts") or ts
@@ -565,6 +744,59 @@ def process_conversation(client: WebClient, event, text: str):
 
     logging.debug("🔔 Processing: %s", resolve_user_mentions(client, cleaned).strip())
 
+    # FIRST PRIORITY: Check for custom feedback BEFORE anything else
+    if normalized.upper().startswith(_feedback_text.upper()):
+        feedback_content = normalized[len(_feedback_text):].strip()
+        if feedback_content:
+            # Check if this custom feedback is for a pending "Tell Us More" request
+            user_number = _pending_custom_feedback_users.get(thread)
+            
+            if user_number:
+                # Use the same user number as the original "Tell Us More" click
+                feedback_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                user_key = f"User-{user_number}"
+                _custom_feedback_log[user_key] = {
+                    "TimeStamp": feedback_time,
+                    "feedback_text": feedback_content,
+                    "message_ts": thread
+                }
+                # Remove from pending list
+                del _pending_custom_feedback_users[thread]
+            else:
+                # This is a STANDALONE custom feedback
+                # Use next available number from the counter that was last used
+                if _last_used_counter == "up":
+                    # Use thumbs up counter
+                    _vote_up_count += 1
+                    current_user_number = _vote_up_count
+                else:
+                    # Use thumbs down counter
+                    _vote_down_count += 1
+                    current_user_number = _vote_down_count
+                
+                feedback_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                user_key = f"User-{current_user_number}"
+                _custom_feedback_log[user_key] = {
+                    "TimeStamp": feedback_time,
+                    "feedback_text": feedback_content,
+                    "message_ts": thread
+                }
+            
+            save_stats()
+            
+            client.chat_postMessage(
+                channel=ch,
+                thread_ts=thread,
+                text=f"<@{uid}>, Thank you for your detailed feedback! We really appreciate it ❤️"
+            )
+            return
+        else:
+            client.chat_postMessage(
+                channel=ch,
+                thread_ts=thread,
+                text=f"<@{uid}>, please provide your feedback after the FEEDBACK keyword."
+            )
+            return
     
     # Help command
     if resolve_user_mentions(client, cleaned).strip() == "" and not event.get("files"):
@@ -947,7 +1179,7 @@ def handle_app_mention(body,event, say, client, logger):
     client = get_client_for_team(real_team)
     # If a file is attached during the mention, treat it as file_share
     if event.get("files"):
-        return handle_file_share(event, client, logger)
+        return handle_file_share(body,event, client, logger)
     # Otherwise, normal conversation
     process_conversation(client, event, event.get("text", "").strip())
 
@@ -1218,7 +1450,50 @@ def handle_button_click(ack, body, client, logger):
     except Exception as e:
         logger.error(f"Error responding to button click: {e}")
 
+def test_database_connection():
+    """Test database connection and create tables if needed."""
+    try:
+        # Test DB connection
+        test_stats = {
+            "thumbs_up": 0,
+            "thumbs_down": 0,
+            "thumbs_up_log": {},
+            "thumbs_down_log": {},
+            "prev_thumbs_up": 0,
+            "prev_thumbs_down": 0,
+            "unique_user_count": 0,
+            "total_calls": 0,
+            "analyze_calls": 0,
+            "analyze_followups": 0,
+            "general_calls": 0,
+            "general_followups": 0,
+            "pdf_exports": 0,
+            "feedback_up_reasons": {},
+            "feedback_down_reasons": {},
+            "custom_feedback": {}
+        }
+        
+        # Try to save test data
+        if save_stats_to_db(test_stats):
+            print("✅ Database connection successful!")
+            # Clean up test data
+            return True
+        else:
+            print("❌ Failed to save test data to database")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Database connection failed: {e}")
+        return False
 
+# Add this to your main section:
 if __name__=="__main__":
+    # Test database connection
+    print("Testing database connection...")
+    if test_database_connection():
+        print("Database is ready!")
+    else:
+        print("Warning: Database connection failed, falling back to file storage")
+    
     threading.Thread(target=run_health_server, daemon=True).start()
     SocketModeHandler(app,SLACK_APP_TOKEN).start()
