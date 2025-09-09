@@ -457,6 +457,8 @@ def process_conversation(client: WebClient, event, text: str):
     normalized = re.sub(
         r"<(https?://[^>|]+)(?:\|[^>]+)?>", r"\1", cleaned
     ).strip()
+    normalized = normalized.replace("’","'").replace("‘","'").replace("“",'"').replace("”",'"')
+
 
     logging.debug("🔔 Processing: %s", resolve_user_mentions(client, cleaned).strip())
 
