@@ -120,6 +120,74 @@ def extract_excel_as_table(path: str):
     df = df.dropna(how='all')  # Drop fully empty rows
     return df
 
+def _clean_text(s: str) -> str:
+    import re as _re
+    x = str(s).lower()
+    # normalize smart quotes
+    x = x.replace("’", "'").replace("‘", "'").replace("“", '"').replace("”", '"')
+    # treat -, _, / as word separators
+    x = _re.sub(r"[-_/]+", " ", x)
+    # collapse whitespace
+    x = _re.sub(r"\s+", " ", x).strip()
+    return x
+
+def _clean_entity(entity: str) -> str:
+    e = _clean_text(entity)
+    e = re.sub(r"^(the\s+)?(product|person|employee|user)\s+", "", e)
+    return e.strip(" '\"")
+
+def _two_way_contains(series: pd.Series, needle: str) -> pd.Series:
+    s = series.astype(str).str.lower().fillna("")
+    # cell contains needle  OR  needle contains cell (for cases where user typed more words)
+    return s.str.contains(re.escape(needle), regex=True) | s.apply(lambda x: x and x in needle)
+def _role_tokens(text: str) -> set:
+    """Tokenize role text with aliases like 2nd/L2/level 2 → second line."""
+    import re as _re
+    norm = _clean_text(text)
+    toks = set(norm.split())
+
+    # Expand common aliases for "second line"
+    if _re.search(r"\b(2nd|l2|level 2|second level)\b", norm):
+        toks.update({"second", "line"})
+
+    # Expand "second-line" already handled by _clean_text (hyphen→space)
+    return toks
+
+def resolve_role_column(columns, col_query: str) -> str:
+    """Choose the best role column for a query like 'second-line owner'."""
+    q_tokens = _role_tokens(col_query)
+    best_col, best_score = None, -1.0
+
+    for c in columns:
+        c_norm   = _clean_text(c)
+        c_tokens = _role_tokens(c_norm)
+
+        # Base overlap score (how much of the query is covered)
+        common   = len(q_tokens & c_tokens)
+        coverage = common / max(1, len(q_tokens))
+
+        score = 70.0 * coverage
+
+        # Strong signals
+        if "owner" in q_tokens and "owner" in c_tokens:
+            score += 20.0
+        if {"second", "line"}.issubset(q_tokens) and {"second", "line"}.issubset(c_tokens):
+            score += 15.0
+
+        # Penalize mismatched planner/lead if not asked
+        if "planner" in c_tokens and "planner" not in q_tokens:
+            score -= 20.0
+        if "lead" in c_tokens and "lead" not in q_tokens and "owner" in q_tokens:
+            score -= 10.0
+
+        # Exact-ish match bonus
+        if c_norm == _clean_text(col_query):
+            score += 50.0
+
+        if score > best_score:
+            best_score, best_col = score, c
+
+    return best_col
 def answer_from_excel_super_dynamic(df, question):
     q = question.lower().strip()
 
@@ -134,63 +202,65 @@ def answer_from_excel_super_dynamic(df, question):
         return last_rows.to_markdown(index=False)
 
     # 2. "What is the X (and Y) of Z?" or "Which X does Y belong to?" or "Who is the X of Y?"
-    m = re.search(r"(?:what|which|who)\s+(?:is\s+)?(?:the\s+)?(.+?)\s+(?:of|for|does)\s+(.+?)(?:\s+belong to)?[\?\.]?$", q)
+    m = re.search(
+        r"(?:^|\s)(?:what|which|who)\s+(?:is\s+)?(?:the\s+)?(.+?)\s+(?:of|for|does)\s+(?:the\s+)?(?:product\s+)?[\"']?(.+?)[\"']?(?:\s+belong to)?[\?\.]?$",
+        q
+    )
     if m:
-        col_query = m.group(1).strip()
-        entity = m.group(2).strip()
-        
-        # Handle "who is the X of Y" specifically
-        if "who" in q and "development vp" in col_query.lower():
-            # Look for Flexera One in Product name column
-            product_cols = [c for c in df.columns if "product" in c.lower() and "name" in c.lower()]
-            for product_col in product_cols:
-                mask = df[product_col].astype(str).str.lower().str.contains(entity.lower())
-                matches = df[mask]
-                if not matches.empty:
-                    row = matches.iloc[0]
-                    # Find Development VP column
-                    dev_vp_col = None
-                    for col in df.columns:
-                        if "development" in col.lower() and "vp" in col.lower():
-                            dev_vp_col = col
-                            break
-                    if dev_vp_col:
-                        return f"The Development VP of {entity} is: {row[dev_vp_col]}"
-        
-        # General case for other queries
-        col_queries = [c.strip() for c in re.split(r"\band\b|,|/", col_query) if c.strip()]
+        col_query = _clean_text(m.group(1))
+        entity = _clean_entity(m.group(2))
+
         def fuzzy_col_match(columns, col_query):
             for c in columns:
-                if col_query.lower() in c.lower():
+                if col_query in c.lower():
                     return c
             for c in columns:
-                if all(word in c.lower() for word in col_query.lower().split()):
+                if all(word in c.lower() for word in col_query.split()):
                     return c
             return max(columns, key=lambda c: difflib.SequenceMatcher(None, c.lower(), col_query).ratio())
-        
-        best_cols = [fuzzy_col_match(df.columns, cq) for cq in col_queries]
-        
-        # Try to match entity in likely entity columns
-        entity_cols = [c for c in df.columns if any(word in c.lower() for word in ["product", "name", "owner", "person", "employee", "user", "activity"])]
+
+        role_col = resolve_role_column(df.columns, col_query)
+
+        # Prefer product-like columns
+        product_cols = [c for c in df.columns if "product" in c.lower() or ("name" in c.lower() and "product" in c.lower())]
+        candidates = pd.DataFrame()
+        search_cols = product_cols or list(df.columns)
+
+        for pc in search_cols:
+            mask = _two_way_contains(df[pc], entity)
+            if mask.any():
+                part = df[mask].copy()
+                part["_match_col"] = pc
+                candidates = pd.concat([candidates, part], axis=0)
+
+        if not candidates.empty:
+            row = candidates.iloc[0]
+            match_col = row["_match_col"] if "_match_col" in row else search_cols[0]
+            matched_label = row[match_col] if match_col in row.index else "the item"
+
+            if role_col in df.columns:
+                return f"The {role_col} of {matched_label} is: {row[role_col]}"
+
+            likely = [c for c in df.columns if any(k in c.lower() for k in ["owner","manager","lead","support","contact","vp","director","planner"])]
+            if likely:
+                return "\n".join(f"{c}: {row[c]}" for c in likely[:4] if pd.notna(row[c]))
+            return "I found the product row, but couldn’t find a matching role column."
+
+        # If still nothing, try entity-like columns with two-way test
+        entity_cols = [c for c in df.columns if any(word in c.lower() for word in ["product","name","owner","person","employee","user","activity","item","project"])]
         for entity_col in entity_cols:
-            mask = df[entity_col].astype(str).str.lower().str.contains(entity.lower())
+            mask = _two_way_contains(df[entity_col], entity)
             matches = df[mask]
             if not matches.empty:
                 row = matches.iloc[0]
-                if len(best_cols) == 1:
-                    return f"The {best_cols[0]} of {entity} is: {row[best_cols[0]]}"
+                if role_col in df.columns:
+                    return f"The {role_col} of {entity} is: {row[role_col]}"
                 else:
-                    return "\n".join(f"{col}: {row[col]}" for col in best_cols)
-        
-        # fallback: search all columns
-        mask = df.apply(lambda row: entity.lower() in " ".join(str(cell).lower() for cell in row), axis=1)
-        matches = df[mask]
-        if not matches.empty:
-            row = matches.iloc[0]
-            if len(best_cols) == 1:
-                return f"The {best_cols[0]} is: {row[best_cols[0]]}"
-            else:
-                return "\n".join(f"{col}: {row[col]}" for col in best_cols)
+                    likely = [c for c in df.columns if any(k in c.lower() for k in ["owner","manager","lead","support","contact"])]
+                    if likely:
+                        return "\n".join(f"{c}: {row[c]}" for c in likely[:4] if pd.notna(row[c]))
+                    return "I found a matching row, but couldn’t find a matching role column."
+
 
     # 3. "Who is X?" or "details of X"
     m = re.search(r"(?:who\s+is|details\s+of)\s+(.+?)[\?\.]?$", q)
@@ -247,7 +317,7 @@ def answer_from_excel_super_dynamic(df, question):
                     
                     # Format the response
                     entity_title = entity.title()
-                    response = f"{entity_title} is the {primary_role} of {len(items)} items."
+                    response = f"{entity_title} is the {primary_role} of {len(items)} Products."
                     
                     if items:
                         response += f" They are: {', '.join(items[:len(items)-1])}"
@@ -260,7 +330,7 @@ def answer_from_excel_super_dynamic(df, question):
                     # Show details of latest 3 entries
                     if len(person_rows) > 3:
                         latest_3 = person_rows.tail(3)
-                        response += "\n\nLatest 3 entries:"
+                        response += "\n\nFew of the products are given below:"
                     else:
                         latest_3 = person_rows
                         response += f"\n\nDetails of all {len(person_rows)} entries:"

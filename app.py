@@ -2,6 +2,7 @@ from dotenv import load_dotenv
 
 from utils.resolve_user_mentions import resolve_user_mentions
 load_dotenv()
+from utils.global_kb import index_startup_files, query_global_kb
 
 import json
 import os
@@ -562,6 +563,21 @@ def process_conversation(client: WebClient, event, text: str):
     normalized = re.sub(
         r"<(https?://[^>|]+)(?:\|[^>]+)?>", r"\1", cleaned
     ).strip()
+    normalized = normalized.replace("’","'").replace("‘","'").replace("“",'"').replace("”",'"')
+    m_kb = re.match(r"^(?:org|org:|askorg|ask:)\s*(.+)$", normalized, re.IGNORECASE)
+    if m_kb:
+        question = m_kb.group(1).strip()
+        reply = query_global_kb(question, thread)
+
+        # existing stats pattern (keep exactly as you use it for general Q&A)
+        if not is_followup:
+            USAGE_STATS["general_calls"] += 1
+        else:
+            USAGE_STATS["general_followups"] += 1
+        save_stats()
+
+        send_message(client, ch, reply, thread_ts=thread, user_id=uid)
+        return
 
     logging.debug("🔔 Processing: %s", resolve_user_mentions(client, cleaned).strip())
 
@@ -1220,5 +1236,10 @@ def handle_button_click(ack, body, client, logger):
 
 
 if __name__=="__main__":
+    try:
+        index_startup_files()
+    except Exception as e:
+        logging.exception(f"Startup indexing failed: {e}")
     threading.Thread(target=run_health_server, daemon=True).start()
     SocketModeHandler(app,SLACK_APP_TOKEN).start()
+
