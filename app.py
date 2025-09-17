@@ -459,9 +459,13 @@ def process_conversation(client: WebClient, event, text: str):
         r"<(https?://[^>|]+)(?:\|[^>]+)?>", r"\1", cleaned
     ).strip()
     normalized = normalized.replace("’","'").replace("‘","'").replace("“",'"').replace("”",'"')
-    m_kb = re.match(r"^(?:org|org:|askorg|ask:)\s*(.+)$", normalized, re.IGNORECASE)
+    m_kb = re.match(r"^(?:-org|-org:|-askorg|-ask:)\s*(.+)$", normalized, re.IGNORECASE)
     if m_kb:
         question = m_kb.group(1).strip()
+
+        # NEW: pre-analyze the question (spelling/clarity only; JSON-guardrailed; no hallucinations)
+        from chains.preanalyze import preanalyze_question
+        question = preanalyze_question(question)
         reply = query_global_kb(question, thread)
 
         # existing stats pattern (keep exactly as you use it for general Q&A)
