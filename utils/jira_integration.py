@@ -301,7 +301,8 @@ class JiraResponseBuilder:
         })
         
         # Add helpful tips based on intent
-        tips = cls._get_contextual_tips(intent_type)
+        # FIX: Changed from cls._get_contextual_tips to JiraResponseBuilder._get_contextual_tips
+        tips = JiraResponseBuilder._get_contextual_tips(intent_type)
         if tips:
             blocks.append({
                 "type": "section",
