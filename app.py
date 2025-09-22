@@ -35,6 +35,7 @@ from langchain.schema import Document
 from utils.thread_store import THREAD_VECTOR_STORES, EXCEL_TABLES
 from chains.analyze_thread import translation_chain
 from utils.health import health_app, run_health_server
+from utils.jira_integration import process_jira_query, format_jira_help
 logging.basicConfig(level=logging.DEBUG)
 
 
@@ -484,6 +485,31 @@ def handle_thumbs_down_feedback(ack, body, client):
         text=f"<@{uid}>, Thank you for your honest feedback ❤️"
     )
 
+@app.action("copy_jira_command")
+def handle_copy_jira_command(ack, body, client):
+    ack()
+    command = body['actions'][0]['value']
+    
+    # Send ephemeral message with command
+    client.chat_postEphemeral(
+        channel=body['channel']['id'],
+        user=body['user']['id'],
+        text=f"✅ Command ready to paste:\n`{command}`"
+    )
+
+@app.action("jira_plus_help")
+def handle_jira_plus_help(ack, body, client):
+    ack()
+    
+    # Send help message
+    help_response = format_jira_help()
+    client.chat_postEphemeral(
+        channel=body['channel']['id'],
+        user=body['user']['id'],
+        blocks=help_response['blocks'],
+        text="Jira Plus Integration Help"
+    )
+
 def _handle_vote(body, client, vote_type, emoji):
     global _vote_up_count, _vote_down_count
     uid  = body["user"]["id"]
@@ -564,6 +590,43 @@ def process_conversation(client: WebClient, event, text: str):
         r"<(https?://[^>|]+)(?:\|[^>]+)?>", r"\1", cleaned
     ).strip()
     normalized = normalized.replace("’","'").replace("‘","'").replace("“",'"').replace("”",'"')
+    # NEW: Check for Jira queries FIRST (before -org check)
+    jira_response = process_jira_query(normalized)
+    if jira_response:
+        # Track as general call for stats
+        if not is_followup:
+            USAGE_STATS["general_calls"] += 1
+        else:
+            USAGE_STATS["general_followups"] += 1
+        save_stats()
+        
+        # Send the Jira handoff response
+        client.chat_postMessage(
+            channel=ch,
+            blocks=jira_response['blocks'],
+            text="🎫 Jira request detected",
+            thread_ts=thread
+        )
+        
+        # Save to memory for context
+        _get_memory(thread).save_context(
+            {"human_input": f"JIRA: {normalized}"},
+            {"output": "Provided Jira Plus command guidance"}
+        )
+        return
+    
+    # Check for explicit Jira help request
+    if "jira help" in normalized.lower():
+        help_response = format_jira_help()
+        client.chat_postMessage(
+            channel=ch,
+            blocks=help_response['blocks'],
+            text="Jira Plus Integration Help",
+            thread_ts=thread
+        )
+        return
+    
+    # Continue with existing -org/-askorg logic...
     m_kb = re.match(r"^(?:-org|-org:|-askorg|-ask:)\s*(.+)$", normalized, re.IGNORECASE)
     if m_kb:
         question = m_kb.group(1).strip()
@@ -1246,4 +1309,3 @@ if __name__=="__main__":
         logging.exception(f"Startup indexing failed: {e}")
     threading.Thread(target=run_health_server, daemon=True).start()
     SocketModeHandler(app,SLACK_APP_TOKEN).start()
-
