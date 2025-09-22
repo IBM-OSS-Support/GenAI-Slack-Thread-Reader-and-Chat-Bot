@@ -485,6 +485,31 @@ def handle_thumbs_down_feedback(ack, body, client):
         text=f"<@{uid}>, Thank you for your honest feedback ❤️"
     )
 
+@app.action("copy_jira_command")
+def handle_copy_jira_command(ack, body, client):
+    ack()
+    command = body['actions'][0]['value']
+    
+    # Send ephemeral message with command
+    client.chat_postEphemeral(
+        channel=body['channel']['id'],
+        user=body['user']['id'],
+        text=f"✅ Command ready to paste:\n`{command}`"
+    )
+
+@app.action("jira_plus_help")
+def handle_jira_plus_help(ack, body, client):
+    ack()
+    
+    # Send help message
+    help_response = format_jira_help()
+    client.chat_postEphemeral(
+        channel=body['channel']['id'],
+        user=body['user']['id'],
+        blocks=help_response['blocks'],
+        text="Jira Plus Integration Help"
+    )
+
 def _handle_vote(body, client, vote_type, emoji):
     global _vote_up_count, _vote_down_count
     uid  = body["user"]["id"]
@@ -1284,4 +1309,3 @@ if __name__=="__main__":
         logging.exception(f"Startup indexing failed: {e}")
     threading.Thread(target=run_health_server, daemon=True).start()
     SocketModeHandler(app,SLACK_APP_TOKEN).start()
-
