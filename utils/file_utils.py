@@ -17,6 +17,48 @@ import pandas as pd
 import difflib
 from langchain.schema import Document
 
+# --- Column aliases + preferred order for "product profile" rendering ---
+COL_ALIASES_PROFILE = {
+    "product name": "product_name",
+    "product": "product_name",
+    "name": "product_name",
+
+    "other names this product is called (e.g. old names people still use)": "other_names",
+    "aka": "other_names",
+    "aliases": "other_names",
+
+    "brief description of what product does for a client": "description",
+
+    "product manager": "product_manager",
+    "product mgmt vp": "product_mgmt_vp",
+    "vp product mgmt": "product_mgmt_vp",
+    "development vp": "development_vp",
+    "support owner": "support_owner",
+    "2nd line or first line owner": "second_line_owner",
+    "support director": "support_director",
+    "support planner": "support_planner",
+    "pillar": "pillar",
+    "mmt name (meeting where the cross functional team's meet and vote)": "mmt_name",
+    "mmt name https://w3.ibm.com/w3publisher/software-support-community/new-page": "mmt_url",
+}
+PREFERRED_PROFILE_ORDER = [
+    "product_name",
+    "other_names",
+    "description",
+    "product_manager",
+    "product_mgmt_vp",
+    "development_vp",
+    "support_owner",
+    "second_line_owner",
+    "support_director",
+    "support_planner",
+    "pillar",
+    "mmt_name",
+    "mmt_url",
+]
+
+NOT_FOUND_MSG = "I couldn't find relevant information in the file."
+
 def sanitize_filename(fn: str) -> str:
     """
     Replace any character that is not alphanumeric, dot, hyphen, or underscore 
@@ -88,7 +130,7 @@ def extract_text_from_file(path: str) -> str:
         try:
             with open(path, "r", encoding="utf-8", errors="ignore") as f:
                 return f.read()
-        except Exception as e:
+        except Exception:
             # If it’s not text, return empty or raise
             return ""
 
@@ -109,6 +151,7 @@ def extract_excel_as_table(path: str):
     # Read all rows as raw data
     df_raw = pd.read_excel(path, header=None, engine="openpyxl" if ext == "xlsx" else "xlrd")
     # Find the first row with at least 2 non-empty cells (likely the header)
+    header_row = 0
     for i, row in df_raw.iterrows():
         non_empty = sum([bool(str(cell).strip()) for cell in row])
         if non_empty >= 2:
@@ -138,8 +181,10 @@ def _clean_entity(entity: str) -> str:
 
 def _two_way_contains(series: pd.Series, needle: str) -> pd.Series:
     s = series.astype(str).str.lower().fillna("")
+    needle = (needle or "").lower()
     # cell contains needle  OR  needle contains cell (for cases where user typed more words)
-    return s.str.contains(re.escape(needle), regex=True) | s.apply(lambda x: x and x in needle)
+    return s.str.contains(re.escape(needle), regex=True) | s.apply(lambda x: bool(x) and x in needle)
+
 def _role_tokens(text: str) -> set:
     """Tokenize role text with aliases like 2nd/L2/level 2 → second line."""
     import re as _re
@@ -153,9 +198,14 @@ def _role_tokens(text: str) -> set:
     # Expand "second-line" already handled by _clean_text (hyphen→space)
     return toks
 
-def resolve_role_column(columns, col_query: str) -> str:
-    """Choose the best role column for a query like 'second-line owner'."""
+def resolve_role_column(columns, col_query: str, min_score: float = 60.0):
+    """
+    Choose the best role column for a query like 'support director'.
+    Returns (best_col or None, score). Applies thresholds and penalizes non-role columns.
+    """
     q_tokens = _role_tokens(col_query)
+    role_keywords = {"owner", "manager", "lead", "support", "vp", "director", "planner", "head"}
+
     best_col, best_score = None, -1.0
 
     for c in columns:
@@ -165,65 +215,390 @@ def resolve_role_column(columns, col_query: str) -> str:
         # Base overlap score (how much of the query is covered)
         common   = len(q_tokens & c_tokens)
         coverage = common / max(1, len(q_tokens))
-
         score = 70.0 * coverage
 
-        # Strong signals
-        if "owner" in q_tokens and "owner" in c_tokens:
-            score += 20.0
-        if {"second", "line"}.issubset(q_tokens) and {"second", "line"}.issubset(c_tokens):
-            score += 15.0
-
-        # Penalize mismatched planner/lead if not asked
-        if "planner" in c_tokens and "planner" not in q_tokens:
-            score -= 20.0
-        if "lead" in c_tokens and "lead" not in q_tokens and "owner" in q_tokens:
-            score -= 10.0
+        # Strong signals: matching role keywords
+        if any(k in q_tokens and k in c_tokens for k in role_keywords):
+            score += 25.0
 
         # Exact-ish match bonus
         if c_norm == _clean_text(col_query):
             score += 50.0
 
+        # PENALTIES: avoid matching product-ish columns as roles
+        if ("product" in c_tokens or "name" in c_tokens) and not (("product" in q_tokens) or ("name" in q_tokens)):
+            score -= 100.0
+
+        # Extra penalty if planner not asked
+        if "planner" in c_tokens and "planner" not in q_tokens:
+            score -= 20.0
+
         if score > best_score:
             best_score, best_col = score, c
 
-    return best_col
-def answer_from_excel_super_dynamic(df, question):
-    q = question.lower().strip()
+    # Threshold: if not confident, return None
+    if best_score < min_score or best_col is None:
+        return (None, best_score)
 
-    # 1. Show last N rows
-    m = re.search(r"last\s+(\d+)\s+(rows|data|entries|records|activities|tasks|items)", q)
+    # Also require that the chosen column actually looks like a role column
+    best_tokens = _role_tokens(best_col)
+    if not any(k in best_tokens for k in role_keywords):
+        return (None, best_score)
+
+    return (best_col, best_score)
+
+def _normalize_dashes(s: str) -> str:
+    return s.replace("–", "-").replace("—", "-")
+
+def _map_columns_profile(df: pd.DataFrame) -> dict:
+    """
+    Map dataframe columns to canonical keys using COL_ALIASES_PROFILE (fuzzy).
+    Returns {original_col_name: canonical_key}
+    """
+    mapping = {}
+    for col in df.columns:
+        key = str(col).strip().lower()
+        key = _clean_text(key)
+        # exact
+        if key in COL_ALIASES_PROFILE:
+            mapping[col] = COL_ALIASES_PROFILE[key]
+            continue
+        # fuzzy
+        best = difflib.get_close_matches(key, COL_ALIASES_PROFILE.keys(), n=1, cutoff=0.92)
+        if best:
+            mapping[col] = COL_ALIASES_PROFILE[best[0]]
+    return mapping
+
+def _product_columns(df: pd.DataFrame, colmap: dict) -> list:
+    # columns that are canonical "product_name" or look product-ish
+    prod_cols = [c for c, canon in colmap.items() if canon == "product_name"]
+    if not prod_cols:
+        prod_cols = [c for c in df.columns if "product" in str(c).lower() or ("name" in str(c).lower() and "product" in str(c).lower())]
+        if not prod_cols:
+            # last resort: any column containing "name"
+            prod_cols = [c for c in df.columns if "name" in str(c).lower()]
+    return prod_cols
+
+def _best_product_row(df: pd.DataFrame, product_query: str, prod_cols: list) -> int | None:
+    """
+    Return index of best matching row for product_query, or None.
+    """
+    if not prod_cols:
+        return None
+    # exact/ci first
+    for c in prod_cols:
+        mask = df[c].astype(str).str.strip().str.lower() == product_query.strip().lower()
+        if mask.any():
+            return mask[mask].index[0]
+    # fuzzy across all candidate values
+    candidates = []
+    for c in prod_cols:
+        vals = df[c].dropna().astype(str).tolist()
+        candidates.extend(vals)
+    best = difflib.get_close_matches(product_query, candidates, n=1, cutoff=0.7)
+    if best:
+        target = best[0]
+        for c in prod_cols:
+            mask = df[c].astype(str).str.strip() == target
+            if mask.any():
+                return mask[mask].index[0]
+    # contains fallback
+    ql = product_query.lower()
+    for c in prod_cols:
+        mask = df[c].astype(str).str.lower().str.contains(re.escape(ql), na=False)
+        if mask.any():
+            return mask[mask].index[0]
+    return None
+
+def build_product_profile_from_df(df: pd.DataFrame, product_query: str) -> str | None:
+    """
+    Build a multi-line Slack-friendly product profile string from a single sheet.
+    Returns text or None if not found.
+    """
+    if df is None or df.empty:
+        return None
+    colmap = _map_columns_profile(df)
+    prod_cols = _product_columns(df, colmap)
+    if not prod_cols:
+        return None
+
+    ridx = _best_product_row(df, product_query, prod_cols)
+    if ridx is None:
+        return None
+
+    row = df.loc[ridx]
+    # assemble canonical dict
+    canon = {}
+    for orig, key in colmap.items():
+        val = row.get(orig, None)
+        if pd.notna(val) and str(val).strip() and key:
+            canon[key] = str(val).strip()
+
+    # try to set product_name if missing
+    if "product_name" not in canon:
+        for c in prod_cols:
+            val = row.get(c, None)
+            if pd.notna(val) and str(val).strip():
+                canon["product_name"] = str(val).strip()
+                break
+
+    # if still nothing meaningful, bail
+    if not canon:
+        return None
+
+    # render
+    lines = []
+    title = canon.get("product_name", product_query)
+    lines.append(f"*• Product:* {title}")
+    ordered_keys = [k for k in PREFERRED_PROFILE_ORDER if k in canon] + [k for k in canon.keys() if k not in PREFERRED_PROFILE_ORDER]
+
+    for k in ordered_keys:
+        if k == "product_name":
+            continue
+        label = {
+            "other_names": "Also known as",
+            "description": "Description",
+            "product_manager": "Product Manager",
+            "product_mgmt_vp": "Product Mgmt VP",
+            "development_vp": "Development VP",
+            "support_owner": "Support Owner",
+            "second_line_owner": "2nd/1st Line Owner",
+            "support_director": "Support Director",
+            "support_planner": "Support Planner",
+            "pillar": "Pillar",
+            "mmt_name": "MMT",
+            "mmt_url": "MMT URL",
+        }.get(k, k.replace("_", " ").title())
+        lines.append(f"*• {label}:* {canon[k]}")
+    return "\n".join(lines)
+
+def answer_from_excel_super_dynamic(df, question):
+    import re as _re
+    import difflib as _difflib
+    import pandas as _pd
+
+    # -------------------------
+    # local helpers (namespaced)
+    # -------------------------
+    def __pp_normalize_dashes(s: str) -> str:
+        return s.replace("–", "-").replace("—", "-")
+
+    # Local copies for isolation
+    COL_ALIASES_PROFILE = {
+        "product name": "product_name",
+        "product": "product_name",
+        "name": "product_name",
+
+        "other names this product is called (e.g. old names people still use)": "other_names",
+        "aka": "other_names",
+        "aliases": "other_names",
+
+        "brief description of what product does for a client": "description",
+
+        "product manager": "product_manager",
+        "product mgmt vp": "product_mgmt_vp",
+        "vp product mgmt": "product_mgmt_vp",
+        "development vp": "development_vp",
+        "support owner": "support_owner",
+        "2nd line or first line owner": "second_line_owner",
+        "support director": "support_director",
+        "support planner": "support_planner",
+        "pillar": "pillar",
+        "mmt name (meeting where the cross functional team's meet and vote)": "mmt_name",
+        "mmt name https://w3.ibm.com/w3publisher/software-support-community/new-page": "mmt_url",
+    }
+    PREFERRED_PROFILE_ORDER = [
+        "product_name",
+        "other_names",
+        "description",
+        "product_manager",
+        "product_mgmt_vp",
+        "development_vp",
+        "support_owner",
+        "second_line_owner",
+        "support_director",
+        "support_planner",
+        "pillar",
+        "mmt_name",
+        "mmt_url",
+    ]
+
+    def __pp_map_columns_profile(df_: _pd.DataFrame) -> dict:
+        mapping = {}
+        for col in df_.columns:
+            key = str(col).strip().lower()
+            # reuse your _clean_text if present; else light normalize
+            try:
+                key = _clean_text(key)
+            except Exception:
+                key = _re.sub(r"[-_/]+", " ", key)
+                key = _re.sub(r"\s+", " ", key).strip()
+            if key in COL_ALIASES_PROFILE:
+                mapping[col] = COL_ALIASES_PROFILE[key]
+                continue
+            best = _difflib.get_close_matches(key, COL_ALIASES_PROFILE.keys(), n=1, cutoff=0.92)
+            if best:
+                mapping[col] = COL_ALIASES_PROFILE[best[0]]
+        return mapping
+
+    def __pp_product_columns(df_: _pd.DataFrame, colmap: dict) -> list:
+        prod_cols = [c for c, canon in colmap.items() if canon == "product_name"]
+        if not prod_cols:
+            prod_cols = [c for c in df_.columns if "product" in str(c).lower() or ("name" in str(c).lower() and "product" in str(c).lower())]
+            if not prod_cols:
+                prod_cols = [c for c in df_.columns if "name" in str(c).lower()]
+        return prod_cols
+
+    def __pp_best_product_row(df_: _pd.DataFrame, product_query: str, prod_cols: list):
+        if not prod_cols:
+            return None
+        # exact/ci
+        for c in prod_cols:
+            mask = df_[c].astype(str).str.strip().str.lower() == product_query.strip().lower()
+            if mask.any():
+                return mask[mask].index[0]
+        # fuzzy
+        candidates = []
+        for c in prod_cols:
+            vals = df_[c].dropna().astype(str).tolist()
+            candidates.extend(vals)
+        best = _difflib.get_close_matches(product_query, candidates, n=1, cutoff=0.7)
+        if best:
+            target = best[0]
+            for c in prod_cols:
+                mask = df_[c].astype(str).str.strip() == target
+                if mask.any():
+                    return mask[mask].index[0]
+        # contains
+        ql = product_query.lower()
+        for c in prod_cols:
+            mask = df_[c].astype(str).str.lower().str.contains(_re.escape(ql), na=False)
+            if mask.any():
+                return mask[mask].index[0]
+        return None
+
+    def __pp_build_product_profile_from_df(df_: _pd.DataFrame, product_query: str):
+        if df_ is None or df_.empty:
+            return None
+        colmap = __pp_map_columns_profile(df_)
+        prod_cols = __pp_product_columns(df_, colmap)
+        if not prod_cols:
+            return None
+
+        ridx = __pp_best_product_row(df_, product_query, prod_cols)
+        if ridx is None:
+            return None
+
+        row = df_.loc[ridx]
+        canon = {}
+        for orig, key in colmap.items():
+            val = row.get(orig, None)
+            if _pd.notna(val) and str(val).strip() and key:
+                canon[key] = str(val).strip()
+
+        if "product_name" not in canon:
+            for c in prod_cols:
+                val = row.get(c, None)
+                if _pd.notna(val) and str(val).strip():
+                    canon["product_name"] = str(val).strip()
+                    break
+
+        if not canon:
+            return None
+
+        lines = []
+        title = canon.get("product_name", product_query)
+        lines.append(f"*• Product:* {title}")
+        ordered_keys = [k for k in PREFERRED_PROFILE_ORDER if k in canon] + [k for k in canon.keys() if k not in PREFERRED_PROFILE_ORDER]
+        label_map = {
+            "other_names": "Also known as",
+            "description": "Description",
+            "product_manager": "Product Manager",
+            "product_mgmt_vp": "Product Mgmt VP",
+            "development_vp": "Development VP",
+            "support_owner": "Support Owner",
+            "second_line_owner": "2nd/1st Line Owner",
+            "support_director": "Support Director",
+            "support_planner": "Support Planner",
+            "pillar": "Pillar",
+            "mmt_name": "MMT",
+            "mmt_url": "MMT URL",
+        }
+        for k in ordered_keys:
+            if k == "product_name":
+                continue
+            label = label_map.get(k, k.replace("_", " ").title())
+            lines.append(f"*• {label}:* {canon[k]}")
+        return "\n".join(lines)
+
+    # -------------------------------------------------
+    # main logic begins
+    # -------------------------------------------------
+    q = __pp_normalize_dashes(question).lower().strip()
+
+    # Optional guard: if question asks for a role we don't track, fail fast.
+    ROLE_HINTS = ["marketing head", "head of marketing", "marketing lead"]
+    known_cols_lc = [c.lower() for c in df.columns]
+    if any(h in q for h in ROLE_HINTS):
+        if not any("marketing" in c for c in known_cols_lc):
+            return NOT_FOUND_MSG
+
+    # 0) explicit directive for full profile (from upstream)
+    if q.startswith("full_product_profile::"):
+        product_query = q.split("::", 1)[1].strip().strip('"\'')
+
+        # collapse spaces
+        product_query = _re.sub(r"\s+", " ", product_query)
+        prof = __pp_build_product_profile_from_df(df, product_query)
+        if prof:
+            return prof
+        # fall through if not found in this sheet
+
+    # 0.1) support direct command phrasing here too
+    m_direct = _re.match(r"^-\s*(?:g\s+)?product\s+(.+)$", q, _re.IGNORECASE)
+    if m_direct:
+        product_query = m_direct.group(1).strip().strip('"\'')
+
+        product_query = _re.sub(r"\s+", " ", product_query)
+        prof = __pp_build_product_profile_from_df(df, product_query)
+        if prof:
+            return prof
+        # fall through to other handlers
+
+    # 1) Show last N rows
+    m = _re.search(r"last\s+(\d+)\s+(rows|data|entries|records|activities|tasks|items)", q)
     if m:
         n = int(m.group(1))
         last_rows = df.tail(n)
         if len(last_rows) == 1:
             row = last_rows.iloc[0]
             return "\n".join(f"{col}: {row[col]}" for col in df.columns)
-        return last_rows.to_markdown(index=False)
+        try:
+            return last_rows.to_markdown(index=False)
+        except Exception:
+            return last_rows.to_string(index=False)
 
-    # 2. "What is the X (and Y) of Z?" or "Which X does Y belong to?" or "Who is the X of Y?"
-    m = re.search(
+    # 2) "What/Which/Who is X of Z?"  (STRICT)
+    m = _re.search(
         r"(?:^|\s)(?:what|which|who)\s+(?:is\s+)?(?:the\s+)?(.+?)\s+(?:of|for|does)\s+(?:the\s+)?(?:product\s+)?[\"']?(.+?)[\"']?(?:\s+belong to)?[\?\.]?$",
         q
     )
     if m:
         col_query = _clean_text(m.group(1))
-        entity = _clean_entity(m.group(2))
+        entity    = _clean_entity(m.group(2))
 
-        def fuzzy_col_match(columns, col_query):
-            for c in columns:
-                if col_query in c.lower():
-                    return c
-            for c in columns:
-                if all(word in c.lower() for word in col_query.split()):
-                    return c
-            return max(columns, key=lambda c: difflib.SequenceMatcher(None, c.lower(), col_query).ratio())
+        role_col, role_score = resolve_role_column(df.columns, col_query)
 
-        role_col = resolve_role_column(df.columns, col_query)
+        # If we couldn't confidently map the role, bail out
+        if not role_col:
+            return NOT_FOUND_MSG
 
-        # Prefer product-like columns
+        # Avoid accidental "product name" matches as role
+        if re.search(r"\b(product|name)\b", role_col, re.I):
+            return NOT_FOUND_MSG
+
         product_cols = [c for c in df.columns if "product" in c.lower() or ("name" in c.lower() and "product" in c.lower())]
-        candidates = pd.DataFrame()
+        candidates = _pd.DataFrame()
         search_cols = product_cols or list(df.columns)
 
         for pc in search_cols:
@@ -231,181 +606,122 @@ def answer_from_excel_super_dynamic(df, question):
             if mask.any():
                 part = df[mask].copy()
                 part["_match_col"] = pc
-                candidates = pd.concat([candidates, part], axis=0)
+                candidates = _pd.concat([candidates, part], axis=0)
 
         if not candidates.empty:
             row = candidates.iloc[0]
             match_col = row["_match_col"] if "_match_col" in row else search_cols[0]
             matched_label = row[match_col] if match_col in row.index else "the item"
 
-            if role_col in df.columns:
+            # STRICT: only answer if resolved role column exists and is populated
+            if (role_col in df.columns) and _pd.notna(row.get(role_col, None)) and str(row.get(role_col)).strip():
                 return f"The {role_col} of {matched_label} is: {row[role_col]}"
 
-            likely = [c for c in df.columns if any(k in c.lower() for k in ["owner","manager","lead","support","contact","vp","director","planner"])]
-            if likely:
-                return "\n".join(f"{c}: {row[c]}" for c in likely[:4] if pd.notna(row[c]))
-            return "I found the product row, but couldn’t find a matching role column."
+            return NOT_FOUND_MSG
 
-        # If still nothing, try entity-like columns with two-way test
-        entity_cols = [c for c in df.columns if any(word in c.lower() for word in ["product","name","owner","person","employee","user","activity","item","project"])]
+        # Try entity-like columns with two-way test (STRICT)
+        entity_cols = [c for c in df.columns if any(word in c.lower() for word in
+                        ["product","name","owner","person","employee","user","activity","item","project"])]
         for entity_col in entity_cols:
             mask = _two_way_contains(df[entity_col], entity)
             matches = df[mask]
             if not matches.empty:
                 row = matches.iloc[0]
-                if role_col in df.columns:
+                if (role_col in df.columns) and _pd.notna(row.get(role_col, None)) and str(row.get(role_col)).strip():
                     return f"The {role_col} of {entity} is: {row[role_col]}"
-                else:
-                    likely = [c for c in df.columns if any(k in c.lower() for k in ["owner","manager","lead","support","contact"])]
-                    if likely:
-                        return "\n".join(f"{c}: {row[c]}" for c in likely[:4] if pd.notna(row[c]))
-                    return "I found a matching row, but couldn’t find a matching role column."
+                return NOT_FOUND_MSG
 
-
-    # 3. "Who is X?" or "details of X"
-    m = re.search(r"(?:who\s+is|details\s+of)\s+(.+?)[\?\.]?$", q)
+    # 3) "Who is X?" or "details of X"  (STRICT)
+    m = _re.search(r"(?:who\s+is|details\s+of)\s+(.+?)[\?\.]?$", q)
     if m:
         entity = m.group(1).strip()
-        
-        # Search for the entity across all columns
-        all_matches = pd.DataFrame()
+        all_matches = _pd.DataFrame()
         for col in df.columns:
             mask = df[col].astype(str).str.lower().str.contains(entity.lower())
             if mask.any():
-                all_matches = pd.concat([all_matches, df[mask]])
-        
-        # Remove duplicates
+                all_matches = _pd.concat([all_matches, df[mask]])
+
         all_matches = all_matches.drop_duplicates()
-        
+
         if not all_matches.empty:
-            # Analyze what role this person has
             role_info = {}
-            
-            # Check each column to understand the person's role
             for col in df.columns:
                 if any(word in col.lower() for word in ["owner", "manager", "lead", "vp", "director", "planner"]):
-                    # Count how many times this person appears in this role column
                     count = (all_matches[col].astype(str).str.lower() == entity.lower()).sum()
                     if count > 0:
                         role_info[col] = count
-            
-            # Find the most relevant column where this person appears
-            if role_info:
-                # Person has specific roles
-                primary_role = max(role_info.items(), key=lambda x: x[1])[0]
-                total_count = role_info[primary_role]
-                
-                # Get all products/items associated with this person in their primary role
-                mask = df[primary_role].astype(str).str.lower() == entity.lower()
-                person_rows = df[mask]
-                
-                # Find the product/item column
-                item_col = None
+
+            if not role_info:
+                return NOT_FOUND_MSG
+
+            primary_role = max(role_info.items(), key=lambda x: x[1])[0]
+            mask = df[primary_role].astype(str).str.lower() == entity.lower()
+            person_rows = df[mask]
+
+            if person_rows.empty:
+                return NOT_FOUND_MSG
+
+            # pick an item/name column to render context (optional)
+            item_col = None
+            for col in df.columns:
+                if any(word in col.lower() for word in ["product", "activity", "task", "item", "project"]) and "name" in col.lower():
+                    item_col = col
+                    break
+            if not item_col:
                 for col in df.columns:
-                    if any(word in col.lower() for word in ["product", "activity", "task", "item", "project"]) and "name" in col.lower():
+                    if "name" in col.lower():
                         item_col = col
                         break
-                if not item_col:  # Fallback to first column that looks like a name
-                    for col in df.columns:
-                        if "name" in col.lower():
-                            item_col = col
-                            break
-                
-                if item_col and item_col in person_rows.columns:
-                    items = person_rows[item_col].dropna().tolist()
-                    items = [str(item) for item in items if str(item) != 'nan']
-                    
-                    # Format the response
-                    entity_title = entity.title()
-                    response = f"{entity_title} is the {primary_role} of {len(items)} Products."
-                    
-                    if items:
-                        response += f" They are: {', '.join(items[:len(items)-1])}"
-                        if len(items) > 1:
-                            response += f", and {items[-1]}"
-                        else:
-                            response += f"{items[0]}"
-                        response += "."
-                    
-                    # Show details of latest 3 entries
-                    if len(person_rows) > 3:
-                        latest_3 = person_rows.tail(3)
-                        response += "\n\nFew of the products are given below:"
-                    else:
-                        latest_3 = person_rows
-                        response += f"\n\nDetails of all {len(person_rows)} entries:"
-                    
-                    for idx, row in latest_3.iterrows():
-                        response += f"\n\n{row[item_col] if item_col else f'Entry {idx}'}:"
-                        # Show key columns only
-                        key_cols = [col for col in df.columns if col != primary_role and pd.notna(row[col]) and str(row[col]) != 'nan'][:4]
-                        for col in key_cols:
-                            response += f"\n  - {col}: {row[col]}"
-                    
-                    if len(person_rows) > 3:
-                        response += f"\n\nI'm unable to provide full details for all {len(person_rows)} entries in this format. Please refine your query for specific information."
-                    
-                    return response
-            
-            # Fallback: person found but not in a clear role column
-            # Just show where they appear
-            response = f"Found {entity.title()} in {len(all_matches)} entries."
-            if len(all_matches) <= 3:
-                response += "\n\nDetails:"
-                for idx, row in all_matches.iterrows():
-                    response += "\n"
-                    relevant_cols = [col for col in df.columns if pd.notna(row[col]) and str(row[col]) != 'nan' and entity.lower() in str(row[col]).lower()][:3]
-                    for col in relevant_cols:
-                        response += f"\n  - {col}: {row[col]}"
-            else:
-                response += " Please be more specific about what information you need."
-            
+
+            # If nothing sensible to render, still return strict fact
+            items = []
+            if item_col and item_col in person_rows.columns:
+                items = person_rows[item_col].dropna().astype(str).tolist()
+                items = [s for s in items if s and s.lower() != 'nan']
+
+            entity_title = entity.title()
+            response = f"{entity_title} is the {primary_role} of {len(person_rows)} entr{'y' if len(person_rows)==1 else 'ies'}."
+            if items:
+                if len(items) == 1:
+                    response += f" They are: {items[0]}."
+                else:
+                    response += f" They are: {', '.join(items[:-1])}, and {items[-1]}."
             return response
 
-    # 4. "Show nth row" - only return specific row requests
-    m = re.search(r"show\s+(\d+)(?:st|nd|rd|th)?\s+row", q)
+        # No matches at all
+        return NOT_FOUND_MSG
+
+    # 4) "Show nth row"
+    m = _re.search(r"show\s+(\d+)(?:st|nd|rd|th)?\s+row", q)
     if m:
-        row_num = int(m.group(1)) - 1  # Convert to 0-based index
+        row_num = int(m.group(1)) - 1
         if 0 <= row_num < len(df):
             row = df.iloc[row_num]
-            return "\n".join(f"{col}: {row[col]}" for col in df.columns if pd.notna(row[col]) and str(row[col]) != 'nan')
+            return "\n".join(f"{col}: {row[col]}" for col in df.columns if _pd.notna(row[col]) and str(row[col]) != 'nan')
         else:
             return f"Row {row_num + 1} does not exist. The data has {len(df)} rows."
 
-    # Check if user is asking for "show all" and decline
+    # "show all" guard
     if any(phrase in q for phrase in ["show all", "list all", "display all", "all rows", "all entries", "show everything", "full data", "complete data"]):
         return "I'm not able to retrieve all data. Please refine your query for specific information.[example: 'show me the last 3 rows', 'show me the first row'. etc.]"
 
-    # 5. Fallback: best-match single value
-    best_row_idx = None
-    best_row_score = 0
-    for idx, row in df.iterrows():
-        row_text = " ".join(str(cell).lower() for cell in row)
-        score = sum(word in row_text for word in q.split() if len(word) > 2)
-        if score > best_row_score:
-            best_row_score = score
-            best_row_idx = idx
+    # 4.5) "products under X" → return all product names that have X in aliases/other names (STRICT)
+    m = _re.search(r"(?:products?\s+under|list\s+(?:the\s+)?products?\s+under)\s+(.+)", q)
+    if m:
+        alias = m.group(1).strip().lower()
+        # Map columns to canonical names
+        colmap = __pp_map_columns_profile(df)
+        alias_cols = [c for c, canon in colmap.items() if canon == "other_names"]
+        prod_cols = __pp_product_columns(df, colmap)
 
-    best_col = None
-    best_col_score = 0
-    for col in df.columns:
-        col_score = sum(word in col.lower() for word in q.split() if len(word) > 2)
-        if col_score > best_col_score:
-            best_col_score = col_score
-            best_col = col
+        if alias_cols and prod_cols:
+            matches = df[df[alias_cols[0]].astype(str).str.lower().str.contains(alias, na=False)]
+            if not matches.empty:
+                products = matches[prod_cols[0]].dropna().astype(str).tolist()
+                if products:
+                    return f"Products under {alias.upper()}: " + ", ".join(products)
 
-    if best_row_idx is not None and best_col is not None:
-        value = df.loc[best_row_idx, best_col]
-        # Find a good label for the row
-        row_label = None
-        for col in df.columns:
-            if any(word in col.lower() for word in ["product", "name", "activity", "item"]):
-                row_label = df.loc[best_row_idx, col]
-                break
-        if row_label and pd.notna(row_label):
-            return f"{best_col} for {row_label}: {value}"
-        else:
-            return f"{best_col}: {value}"
-    
-    return "I couldn't find a relevant answer in the file."
+        return f"I couldn't find any products under {alias.upper()} in this sheet."
 
+    # 5) STRICT: no fuzzy best-match fallback to avoid spurious answers
+    return NOT_FOUND_MSG
