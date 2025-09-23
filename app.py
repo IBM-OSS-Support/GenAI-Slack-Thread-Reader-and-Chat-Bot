@@ -35,6 +35,7 @@ from langchain.schema import Document
 from utils.thread_store import THREAD_VECTOR_STORES, EXCEL_TABLES
 from chains.analyze_thread import translation_chain
 from utils.health import health_app, run_health_server
+from utils.innovation_report import parse_innovation_sheet
 logging.basicConfig(level=logging.DEBUG)
 
 
@@ -826,6 +827,8 @@ def process_conversation(client: WebClient, event, text: str):
 # -------- Ends: Modified RAG Logic with Excel Table Lookup Handler --------
 
 # ── File share handler ──
+# Replace your handle_file_share function with this corrected version:
+
 @app.event({"type": "message", "subtype": "file_share"})
 def handle_file_share(body, event, client: WebClient, logger):
     real_team = detect_real_team_from_event(body, event)
@@ -845,12 +848,13 @@ def handle_file_share(body, event, client: WebClient, logger):
     # Supported file types
     supported = {"pdf", "docx", "doc", "txt", "md", "csv", "py", "xlsx", "xls"}
     ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+    
     if ext not in supported:
         send_message(
             client,
             channel_id,
             (
-                f"⚠️ Oops—I can’t handle *.{ext}* files yet. "
+                f"⚠️ Oops—I can't handle *.{ext}* files yet. "
                 "Right now I only support:\n"
                 "• PDF (.pdf)\n"
                 "• Word documents (.docx, .doc)\n"
@@ -864,7 +868,7 @@ def handle_file_share(body, event, client: WebClient, logger):
         )
         return
 
-    # --- Fetch file info from Slack ---
+    # --- Fetch file info from Slack FIRST ---
     try:
         resp = client.files_info(file=file_id)
         file_info = resp["file"]
@@ -872,7 +876,57 @@ def handle_file_share(body, event, client: WebClient, logger):
         logger.error(f"files_info failed: {e.response['error']}")
         return
 
-    # --- Send "Indexing now..." message immediately! ---
+    # --- NOW check for Innovation Report (file_info is available) ---
+    if ext in ("xlsx", "xls"):
+        # Check if there's an associated app_mention with innovation keywords
+        parent_text = ""
+        
+        # Try to get text from the event that triggered this file share
+        if "text" in event:
+            parent_text = event.get("text", "")
+        # Also check if there's a parent message in the body
+        elif body and "event" in body and "text" in body["event"]:
+            parent_text = body["event"].get("text", "")
+            
+        # Check for innovation report triggers
+        if any(keyword in parent_text.lower() for keyword in ["innovation report", "365 days", "innovation summary", "weekly innovation"]):
+            try:
+                # Download and parse the Excel file
+                local_path = download_slack_file(client, file_info)
+                df = extract_excel_as_table(local_path)
+                
+                # Generate the innovation report
+                report = parse_innovation_sheet(df)
+                
+                if report:
+                    send_message(
+                        client,
+                        channel_id,
+                        report,
+                        thread_ts=thread_ts,
+                        user_id=user_id
+                    )
+                else:
+                    send_message(
+                        client,
+                        channel_id,
+                        "❌ Could not generate the innovation report. Please ensure the Excel file has the required columns: Day, Date, Product Area, Title, Link to video",
+                        thread_ts=thread_ts,
+                        user_id=user_id
+                    )
+                return  # Exit early, don't process as regular Excel
+            except Exception as e:
+                logger.exception(f"Error generating innovation report: {e}")
+                send_message(
+                    client,
+                    channel_id,
+                    f"❌ Error generating innovation report: {str(e)}",
+                    thread_ts=thread_ts,
+                    user_id=user_id
+                )
+                return
+
+    # --- Send "Indexing now..." message for regular files ---
     send_message(
         client,
         channel_id,
@@ -894,7 +948,7 @@ def handle_file_share(body, event, client: WebClient, logger):
         )
         return
 
-    # --- Excel-specific logic ---
+    # --- Excel-specific logic for regular Excel processing ---
     if ext in ("xlsx", "xls"):
         try:
             df = extract_excel_as_table(local_path)
@@ -920,7 +974,7 @@ def handle_file_share(body, event, client: WebClient, logger):
     if not raw_text.strip():
         send_message(
             client, channel_id,
-            f"⚠️ I couldn’t extract any text from *{file_info.get('name')}*.",
+            f"⚠️ I couldn't extract any text from *{file_info.get('name')}*.",
             thread_ts=thread_ts, user_id=user_id
         )
         return
@@ -987,14 +1041,15 @@ def handle_direct_message(body,event, client: WebClient, logger):
     # hand off to your RAG/chat engine exactly as you do in handle_app_mention
     process_conversation(client, event, text)
 @app.event("app_mention")
-def handle_app_mention(body,event, say, client, logger):
+def handle_app_mention(body, event, say, client, logger):
     real_team = detect_real_team_from_event(body, event)
 
     # 2) rebind your client
     client = get_client_for_team(real_team)
     # If a file is attached during the mention, treat it as file_share
     if event.get("files"):
-        return handle_file_share(event, client, logger)
+        # Pass body as well to handle_file_share
+        return handle_file_share(body, event, client, logger)
     # Otherwise, normal conversation
     process_conversation(client, event, event.get("text", "").strip())
 
