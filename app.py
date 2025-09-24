@@ -1328,4 +1328,3 @@ if __name__=="__main__":
         logging.exception(f"Startup indexing failed: {e}")
     threading.Thread(target=run_health_server, daemon=True).start()
     SocketModeHandler(app,SLACK_APP_TOKEN).start()
-

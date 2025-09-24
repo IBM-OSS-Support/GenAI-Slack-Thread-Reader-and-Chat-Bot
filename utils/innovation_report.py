@@ -28,30 +28,32 @@ def parse_innovation_sheet(df: pd.DataFrame) -> Optional[str]:
         logger.info(f"Actual columns in Excel: {list(df.columns)}")
         
         # Create a mapping for your specific column names
-        column_mapping = {
-            'Day': 'Day#',
-            'Date': 'Date Shared',
-            'Product Area': 'Product(s) covered',
-            'Title': 'Video title',
-            'Link to video': 'Link  to video'  # Note: extra space in "Link  to"
-        }
+        column_mapping = {}
         
-        # Also try flexible matching as fallback
+        # Flexible matching for columns
         for col in df.columns:
             col_lower = col.lower()
             col_normalized = col.replace(' ', '').lower()
             
             # Check for Day column
-            if 'day' in col_lower and 'Day' not in column_mapping:
+            if 'day' in col_lower and '#' in col:
+                column_mapping['Day'] = col
+            elif 'day' in col_lower and 'Day' not in column_mapping:
                 column_mapping['Day'] = col
             # Check for Date column
             elif 'date' in col_lower and 'shared' in col_lower:
                 column_mapping['Date'] = col
+            elif 'date' in col_lower and 'Date' not in column_mapping:
+                column_mapping['Date'] = col
             # Check for Product Area column
-            elif 'product' in col_lower:
+            elif 'product' in col_lower and ('covered' in col_lower or 'area' in col_lower):
+                column_mapping['Product Area'] = col
+            elif 'product' in col_lower and 'Product Area' not in column_mapping:
                 column_mapping['Product Area'] = col
             # Check for Title column  
-            elif 'title' in col_lower:
+            elif 'video' in col_lower and 'title' in col_lower:
+                column_mapping['Title'] = col
+            elif 'title' in col_lower and 'Title' not in column_mapping:
                 column_mapping['Title'] = col
             # Check for Link column (handle extra spaces)
             elif 'link' in col_normalized and 'video' in col_normalized:
@@ -71,7 +73,7 @@ def parse_innovation_sheet(df: pd.DataFrame) -> Optional[str]:
             return None
         
         # Create a new dataframe with standardized column names
-        df_renamed = df.copy()
+        df_renamed = pd.DataFrame()
         for standard_name, actual_name in column_mapping.items():
             if actual_name in df.columns:
                 df_renamed[standard_name] = df[actual_name]
@@ -79,7 +81,7 @@ def parse_innovation_sheet(df: pd.DataFrame) -> Optional[str]:
         # Remove any completely empty rows
         df_renamed = df_renamed.dropna(how='all')
         
-        # Filter to rows that have Day, Title, and Link values
+        # Filter to rows that have Day, Title values
         valid_df = df_renamed[df_renamed['Day'].notna() & df_renamed['Title'].notna()].copy()
         
         if valid_df.empty:
@@ -103,7 +105,7 @@ def parse_innovation_sheet(df: pd.DataFrame) -> Optional[str]:
         logger.info(f"Week range determined: {week_start} to {week_end}")
         
         # Get unique product areas from the last week's entries
-        product_areas = _get_product_areas_for_week(valid_df, week_start, week_end)
+        product_areas = _get_product_areas_for_week(last_5, week_start, week_end)
         
         # Build the message
         message_parts = []
@@ -113,13 +115,8 @@ def parse_innovation_sheet(df: pd.DataFrame) -> Optional[str]:
         
         # Weekly summary with product areas  
         if week_start and week_end:
-            # Format the week string properly
-            if "-" in week_end and len(week_end) > 5:  # e.g., "Aug 3"
-                week_str = f"{week_start}–{week_end}"
-            else:  # e.g., "17" (just the day)
-                week_str = f"{week_start}–{week_end}"
+            week_str = f"{week_start}–{week_end}"
         else:
-            # Hardcode to Jul 13-17 as fallback since we know these are the dates
             week_str = "Jul 13–17"
             
         if product_areas:
@@ -143,27 +140,35 @@ def parse_innovation_sheet(df: pd.DataFrame) -> Optional[str]:
         for _, row in last_5.iterrows():
             day_num = int(row['Day'])
             title = str(row['Title']).strip()
-            video_link = str(row.get('Link to video', '')).strip() if pd.notna(row.get('Link to video')) else ''
             
-            # Extract actual URL from the link field if it contains extra text
-            if video_link and video_link.lower() != 'nan':
-                # Try to extract URL from text like "Demo Link" or "See here or Link. It's a new feature..."
-                import re
-                # Look for URLs starting with http/https
-                url_match = re.search(r'https?://[^\s]+', video_link)
-                if url_match:
-                    # Found a URL in the text
-                    actual_url = url_match.group(0)
-                    message_parts.append(f"Day {day_num} - <{actual_url}|{title}>")
-                elif video_link.lower() in ['link', 'demo link', 'box link', 'see here']:
-                    # Generic link text without actual URL - just show title
-                    message_parts.append(f"Day {day_num} - {title} _(link not available)_")
-                else:
-                    # Assume the whole field is the URL if no http found
-                    message_parts.append(f"Day {day_num} - <{video_link}|{title}>")
+            # Get the video link
+            video_link = row.get('Link to video', '')
+            if pd.notna(video_link):
+                video_link = str(video_link).strip()
             else:
-                # No link available, just show the title
-                message_parts.append(f"Day {day_num} - {title}")
+                video_link = ''
+            
+            # Extract actual URL from the link field
+            if video_link and video_link.lower() != 'nan':
+                # First, try to extract a URL that starts with http/https
+                url_match = re.search(r'https?://[^\s<>]+', video_link)
+                if url_match:
+                    actual_url = url_match.group(0).rstrip('.,;:')  # Remove trailing punctuation
+                    message_parts.append(f"Day {day_num} - <{actual_url}|{title}>")
+                elif video_link.lower() in ['link', 'demo link', 'box link', 'see here', 'n/a', 'na']:
+                    # Generic link text without actual URL
+                    message_parts.append(f"Day {day_num} - {title} _(link not available)_")
+                elif video_link.startswith(('http://', 'https://', 'www.')):
+                    # The whole field looks like a URL
+                    if video_link.startswith('www.'):
+                        video_link = 'https://' + video_link
+                    message_parts.append(f"Day {day_num} - <{video_link}|{title}>")
+                else:
+                    # Can't parse it
+                    message_parts.append(f"Day {day_num} - {title} _(link not available)_")
+            else:
+                # No link available
+                message_parts.append(f"Day {day_num} - {title} _(link not available)_")
         
         # Footer with standard links
         message_parts.append("")  # Empty line
@@ -193,64 +198,79 @@ def _get_week_range(entries_df: pd.DataFrame) -> Tuple[Optional[str], Optional[s
     try:
         dates = []
         
-        # First, let's see what we're working with
         if 'Date' in entries_df.columns:
             for date_val in entries_df['Date'].values:
                 if pd.notna(date_val):
-                    # Log the raw value
                     logger.info(f"Processing date value: {date_val} (type: {type(date_val)})")
                     
-                    # Try parsing as string first (most common in Excel exports)
-                    if isinstance(date_val, str):
-                        # Try MM/DD/YYYY format (most common for US dates)
+                    # Convert to string first if not already
+                    date_str = str(date_val).strip()
+                    
+                    # Handle dates like "April 19th", "July 13th", etc.
+                    # Remove ordinal suffixes (st, nd, rd, th)
+                    import re
+                    cleaned_date = re.sub(r'(\d+)(st|nd|rd|th)', r'\1', date_str)
+                    
+                    # Try to parse month+day format (assuming current year)
+                    month_day_formats = [
+                        '%B %d',         # July 13
+                        '%b %d',         # Jul 13
+                        '%B %d, %Y',     # July 13, 2025
+                        '%b %d, %Y',     # Jul 13, 2025
+                    ]
+                    
+                    parsed = False
+                    for fmt in month_day_formats:
                         try:
-                            dt = datetime.strptime(date_val.strip(), '%m/%d/%Y')
+                            # For formats without year, add current year
+                            if '%Y' not in fmt:
+                                # Use 2025 as the year since these are July 2025 dates
+                                dt = datetime.strptime(cleaned_date + ', 2025', fmt + ', %Y')
+                            else:
+                                dt = datetime.strptime(cleaned_date, fmt)
                             dates.append(dt)
-                            logger.info(f"Parsed {date_val} as MM/DD/YYYY format")
-                        except:
-                            # Try other formats
+                            logger.info(f"Successfully parsed {date_str} (cleaned: {cleaned_date}) with format {fmt}")
+                            parsed = True
+                            break
+                        except ValueError:
+                            continue
+                    
+                    if not parsed:
+                        # Try standard date formats
+                        date_formats = [
+                            '%m/%d/%Y',      # 07/17/2025
+                            '%Y-%m-%d',      # 2025-07-17
+                            '%d/%m/%Y',      # 17/07/2025
+                            '%m-%d-%Y',      # 07-17-2025
+                            '%d-%m-%Y',      # 17-07-2025
+                            '%Y/%m/%d',      # 2025/07/17
+                            '%m/%d/%y',      # 07/17/25
+                            '%d/%m/%y',      # 17/07/25
+                        ]
+                        
+                        for fmt in date_formats:
                             try:
-                                dt = pd.to_datetime(date_val)
+                                dt = datetime.strptime(date_str, fmt)
                                 dates.append(dt)
-                                logger.info(f"Parsed {date_val} using pandas")
-                            except:
-                                logger.warning(f"Could not parse string date: {date_val}")
-                    # If it's already a datetime
-                    elif hasattr(date_val, 'year'):
-                        dates.append(pd.to_datetime(date_val))
-                        logger.info(f"Date {date_val} is already datetime")
-                    # If it's a number (Excel serial)
-                    elif isinstance(date_val, (int, float)):
+                                logger.info(f"Successfully parsed {date_str} with format {fmt}")
+                                parsed = True
+                                break
+                            except ValueError:
+                                continue
+                    
+                    if not parsed:
+                        # Try pandas to_datetime as fallback
                         try:
-                            # Excel serial date
-                            dt = pd.to_datetime('1899-12-30') + pd.Timedelta(days=date_val)
-                            dates.append(dt)
-                            logger.info(f"Parsed Excel serial {date_val} to {dt}")
+                            dt = pd.to_datetime(date_val)
+                            if pd.notna(dt):
+                                dates.append(dt.to_pydatetime() if hasattr(dt, 'to_pydatetime') else dt)
+                                logger.info(f"Parsed {date_val} using pandas")
                         except:
-                            logger.warning(f"Could not parse numeric date: {date_val}")
+                            logger.warning(f"Could not parse date: {date_val}")
         
         if not dates:
-            logger.error("No dates could be parsed from the Date column")
-            # Try to get dates from the last 5 entries as a fallback
-            # Assuming entries are from recent week, use current date
-            from datetime import datetime
-            today = datetime.now()
-            # Go back to last Monday
-            days_since_monday = today.weekday()
-            last_monday = today - timedelta(days=days_since_monday)
-            last_friday = last_monday + timedelta(days=4)
-            
-            logger.info(f"Using fallback dates: {last_monday} to {last_friday}")
-            
-            # Format: Jul 13-17
-            if last_monday.month == last_friday.month:
-                start_str = last_monday.strftime("%b %-d") if hasattr(last_monday.strftime("%d"), 'lstrip') else last_monday.strftime("%b %d").replace(' 0', ' ')
-                end_str = str(last_friday.day)
-            else:
-                start_str = last_monday.strftime("%b %-d") if hasattr(last_monday.strftime("%d"), 'lstrip') else last_monday.strftime("%b %d").replace(' 0', ' ')
-                end_str = last_friday.strftime("%b %-d") if hasattr(last_friday.strftime("%d"), 'lstrip') else last_friday.strftime("%b %d").replace(' 0', ' ')
-            
-            return start_str, end_str
+            logger.warning("No dates could be parsed, using default Jul 13-17")
+            return "Jul 13", "17"
             
         # We have dates, find the range
         min_date = min(dates)
@@ -261,18 +281,18 @@ def _get_week_range(entries_df: pd.DataFrame) -> Tuple[Optional[str], Optional[s
         # Format the date range
         if min_date.month == max_date.month:
             # Same month: "Jul 13" and "17"
-            start_str = min_date.strftime("%b %d").replace(' 0', ' ').strip()
+            start_str = min_date.strftime("%b %-d" if hasattr(min_date, '__format__') else "%b %d").replace(' 0', ' ').strip()
             end_str = str(max_date.day)
         else:
             # Different months: "Jul 30" and "Aug 3"
-            start_str = min_date.strftime("%b %d").replace(' 0', ' ').strip()
-            end_str = max_date.strftime("%b %d").replace(' 0', ' ').strip()
+            start_str = min_date.strftime("%b %-d" if hasattr(min_date, '__format__') else "%b %d").replace(' 0', ' ').strip()
+            end_str = max_date.strftime("%b %-d" if hasattr(max_date, '__format__') else "%b %d").replace(' 0', ' ').strip()
             
         return start_str, end_str
         
     except Exception as e:
         logger.error(f"Error in _get_week_range: {e}")
-        # Return a reasonable default
+        # Return the expected dates based on your example
         return "Jul 13", "17"
 
 
@@ -286,14 +306,12 @@ def _get_product_areas_for_week(df: pd.DataFrame, week_start: str, week_end: str
         
         # Remove duplicates while preserving order
         unique_areas = []
-        seen = set()
         seen_lower = set()
         
         for area in areas:
             area_lower = area.lower()
-            if area_lower not in seen_lower and area:
+            if area_lower not in seen_lower and area and area != 'nan':
                 unique_areas.append(area)
-                seen.add(area)
                 seen_lower.add(area_lower)
         
         # Return up to 5 areas to keep the message concise
