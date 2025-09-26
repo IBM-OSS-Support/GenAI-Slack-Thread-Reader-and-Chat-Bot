@@ -14,7 +14,7 @@ def get_llm():
     return ChatOllama(
         base_url=base,
         model=model,
-        temperature=0.2,
+        temperature=0,
         disable_streaming=True,       # single, complete message
         num_ctx=128000,               # 128K context
         num_predict=-1,               # no early cut-offs
