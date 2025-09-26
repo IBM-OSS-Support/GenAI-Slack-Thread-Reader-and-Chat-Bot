@@ -8,17 +8,22 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-def parse_innovation_sheet(df: pd.DataFrame) -> Optional[str]:
+def parse_innovation_sheet(df: pd.DataFrame, day_range: Optional[Tuple[int, int]] = None) -> Optional[str]:
     """
     Parse the 365 Days of Innovation Excel sheet and generate a Slack-formatted message
-    for the last 5 entries with proper hyperlinks.
+    for specified day range or last 5 entries if no range provided.
+    
+    Args:
+        df: The Excel dataframe
+        day_range: Optional tuple of (start_day, end_day) to filter entries
     
     Expected columns (flexible matching):
     - Day# -> Day
     - Date Shared -> Date
     - Product(s) covered -> Product Area
     - Video title -> Title
-    - Link to video -> Link to video
+    - Link to video -> Link to video (not used for hyperlinks)
+    - Link -> Blog Link (used for hyperlinks)
     """
     try:
         # Clean column names (remove leading/trailing spaces)
@@ -55,12 +60,15 @@ def parse_innovation_sheet(df: pd.DataFrame) -> Optional[str]:
                 column_mapping['Title'] = col
             elif 'title' in col_lower and 'Title' not in column_mapping:
                 column_mapping['Title'] = col
-            # Check for Link column (handle extra spaces)
-            elif 'link' in col_normalized and 'video' in col_normalized:
+            # Check for Link to video column (not used but mapped for completeness)
+            elif 'link' in col_lower and 'video' in col_lower:
                 column_mapping['Link to video'] = col
+            # Check for Blog Link column - EXACT match for "Link"
+            elif col == 'Link':
+                column_mapping['Blog Link'] = col
         
-        # Check if we found all required columns
-        required_cols = ['Day', 'Date', 'Product Area', 'Title', 'Link to video']
+        # Check if we found all required columns (Blog Link is what we need for hyperlinks)
+        required_cols = ['Day', 'Date', 'Product Area', 'Title', 'Blog Link']
         missing_cols = []
         for req_col in required_cols:
             if req_col not in column_mapping or column_mapping[req_col] not in df.columns:
@@ -87,82 +95,116 @@ def parse_innovation_sheet(df: pd.DataFrame) -> Optional[str]:
         if valid_df.empty:
             return "No valid innovation entries found in the sheet."
         
-        # Sort by Day number (descending) to get the latest entries
+        # Convert Day column to numeric
         valid_df['Day'] = pd.to_numeric(valid_df['Day'], errors='coerce')
         valid_df = valid_df.dropna(subset=['Day'])
-        valid_df = valid_df.sort_values('Day', ascending=False)
         
-        # Get the last 5 entries (in descending order, then reverse for display)
-        last_5 = valid_df.head(5).sort_values('Day', ascending=True)
+        # Filter based on day range or get last 5
+        if day_range:
+            start_day, end_day = day_range
+            logger.info(f"Filtering for day range: {start_day} to {end_day}")
+            
+            # Filter entries within the specified day range
+            filtered_df = valid_df[(valid_df['Day'] >= start_day) & (valid_df['Day'] <= end_day)]
+            
+            if filtered_df.empty:
+                return f"No innovation entries found for days {start_day} to {end_day}."
+            
+            # Sort by Day number ascending for display
+            entries_to_show = filtered_df.sort_values('Day', ascending=True)
+            
+            logger.info(f"Found {len(entries_to_show)} entries in range {start_day}-{end_day}")
+        else:
+            # Default behavior: get last 5 entries
+            valid_df = valid_df.sort_values('Day', ascending=False)
+            entries_to_show = valid_df.head(5).sort_values('Day', ascending=True)
+            logger.info(f"Using last 5 entries (default behavior)")
         
-        if len(last_5) == 0:
-            return "No valid entries found in the sheet."
+        if len(entries_to_show) == 0:
+            return "No valid entries found in the specified range."
         
         # Get week date range from the entries
-        week_start, week_end = _get_week_range(last_5)
+        week_start, week_end = _get_week_range(entries_to_show)
         
         # Log for debugging
         logger.info(f"Week range determined: {week_start} to {week_end}")
         
-        # Get unique product areas from the last week's entries
-        product_areas = _get_product_areas_for_week(last_5, week_start, week_end)
+        # Get unique product areas from the entries
+        product_areas = _get_product_areas_for_week(entries_to_show, week_start, week_end)
         
         # Build the message
         message_parts = []
         
-        # Header
-        message_parts.append("*365 Days of Innovation*\n")
+        # Header with emotes
+        message_parts.append(":culture-innovation: *365 Days of Innovation* :culture-innovation:\n")
         
-        # Weekly summary with product areas  
+        # Summary section - always use date range from actual dates
         if week_start and week_end:
-            week_str = f"{week_start}–{week_end}"
+            # Format the date range appropriately
+            if week_start and week_end and week_start != week_end:
+                date_str = f"{week_start}–{week_end}"
+            elif week_start:
+                date_str = week_start
+            else:
+                date_str = "this period"
         else:
-            week_str = "Jul 13–17"
-            
+            date_str = "this period"
+        
         if product_areas:
             areas_str = ", ".join(product_areas[:-1])
             if len(product_areas) > 1:
-                areas_str += f", {product_areas[-1]}"
+                areas_str += f", and {product_areas[-1]}"
             else:
                 areas_str = product_areas[0]
             
-            message_parts.append(
-                f"Last week's demos ({week_str}) included sessions on {areas_str}. "
-                "Even more innovation is coming this week!\n"
-            )
+            # Use appropriate intro text based on whether range was specified
+            if day_range:
+                message_parts.append(
+                    f"Last week's demos ({date_str}) included sessions on {areas_str}.\n"
+                )
+            else:
+                message_parts.append(
+                    f"Last week's demos ({date_str}) included sessions on {areas_str}. "
+                    "Even more innovation is coming this week!\n"
+                )
         else:
-            message_parts.append(
-                f"Last week's demos ({week_str}) showcased amazing innovations. "
-                "Even more is coming this week!\n"
-            )
+            if day_range:
+                message_parts.append(
+                    f"Last week's demos ({date_str}):\n"
+                )
+            else:
+                message_parts.append(
+                    f"Last week's demos ({date_str}) showcased amazing innovations. "
+                    "Even more is coming this week!\n"
+                )
         
-        # Add each day's entry with hyperlinked title
-        for _, row in last_5.iterrows():
+        # Add each day's entry with hyperlinked title using BLOG LINK
+        for _, row in entries_to_show.iterrows():
             day_num = int(row['Day'])
             title = str(row['Title']).strip()
             
-            # Get the video link
-            video_link = row.get('Link to video', '')
-            if pd.notna(video_link):
-                video_link = str(video_link).strip()
+            # Get the BLOG link from the "Link" column (mapped as "Blog Link")
+            blog_link = row.get('Blog Link', '')
+            if pd.notna(blog_link):
+                blog_link = str(blog_link).strip()
             else:
-                video_link = ''
+                blog_link = ''
             
-            # Extract actual URL from the link field
-            if video_link and video_link.lower() != 'nan':
+            # Extract actual URL from the blog link field
+            if blog_link and blog_link.lower() != 'nan':
                 # First, try to extract a URL that starts with http/https
-                url_match = re.search(r'https?://[^\s<>]+', video_link)
+                url_match = re.search(r'https?://[^\s<>]+', blog_link)
                 if url_match:
                     actual_url = url_match.group(0).rstrip('.,;:')  # Remove trailing punctuation
                     message_parts.append(f"Day {day_num} - <{actual_url}|{title}>")
-                elif video_link.lower() in ['link', 'demo link', 'box link', 'see here', 'n/a', 'na']:
+                elif blog_link.lower() in ['link', 'demo link', 'box link', 'see here', 'n/a', 'na']:
                     # Generic link text without actual URL
                     message_parts.append(f"Day {day_num} - {title} _(link not available)_")
-                elif video_link.startswith(('http://', 'https://', 'www.')):
+                elif blog_link.startswith(('http://', 'https://', 'www.')):
                     # The whole field looks like a URL
-                    if video_link.startswith('www.'):
-                        video_link = 'https://' + video_link
-                    message_parts.append(f"Day {day_num} - <{video_link}|{title}>")
+                    if blog_link.startswith('www.'):
+                        blog_link = 'https://' + blog_link
+                    message_parts.append(f"Day {day_num} - <{blog_link}|{title}>")
                 else:
                     # Can't parse it
                     message_parts.append(f"Day {day_num} - {title} _(link not available)_")
@@ -179,7 +221,7 @@ def parse_innovation_sheet(df: pd.DataFrame) -> Optional[str]:
         )
         message_parts.append("")  # Empty line
         message_parts.append(
-            "Do you have an innovation demo you'd like to submit? "
+            ":demo3: Do you have an innovation demo you'd like to submit? "
             "Submit your info <https://ibm.box.com/s/re3s3o4r5ciwf74tv9nd028diqms0lh5|here>!"
         )
         
@@ -193,7 +235,7 @@ def parse_innovation_sheet(df: pd.DataFrame) -> Optional[str]:
 def _get_week_range(entries_df: pd.DataFrame) -> Tuple[Optional[str], Optional[str]]:
     """
     Extract the week range from the Date column of the entries.
-    Returns formatted strings like "Jul 13" and "17"
+    Returns formatted strings like "Sept 16" and "Sept 18" or "Sept 16" and "Oct 2"
     """
     try:
         dates = []
@@ -269,8 +311,8 @@ def _get_week_range(entries_df: pd.DataFrame) -> Tuple[Optional[str], Optional[s
                             logger.warning(f"Could not parse date: {date_val}")
         
         if not dates:
-            logger.warning("No dates could be parsed, using default Jul 13-17")
-            return "Jul 13", "17"
+            logger.warning("No dates could be parsed")
+            return None, None
             
         # We have dates, find the range
         min_date = min(dates)
@@ -278,22 +320,25 @@ def _get_week_range(entries_df: pd.DataFrame) -> Tuple[Optional[str], Optional[s
         
         logger.info(f"Date range: {min_date} to {max_date}")
         
-        # Format the date range
-        if min_date.month == max_date.month:
-            # Same month: "Jul 13" and "17"
-            start_str = min_date.strftime("%b %-d" if hasattr(min_date, '__format__') else "%b %d").replace(' 0', ' ').strip()
+        # Format the date range with full month abbreviation and day
+        if min_date == max_date:
+            # Single day
+            start_str = min_date.strftime("%b %d").replace(' 0', ' ').strip()
+            return start_str, start_str
+        elif min_date.month == max_date.month and min_date.year == max_date.year:
+            # Same month and year: "Sept 16" and "18"
+            start_str = min_date.strftime("%b %d").replace(' 0', ' ').strip()
             end_str = str(max_date.day)
         else:
-            # Different months: "Jul 30" and "Aug 3"
-            start_str = min_date.strftime("%b %-d" if hasattr(min_date, '__format__') else "%b %d").replace(' 0', ' ').strip()
-            end_str = max_date.strftime("%b %-d" if hasattr(max_date, '__format__') else "%b %d").replace(' 0', ' ').strip()
+            # Different months or years: "Sept 30" and "Oct 3"
+            start_str = min_date.strftime("%b %d").replace(' 0', ' ').strip()
+            end_str = max_date.strftime("%b %d").replace(' 0', ' ').strip()
             
         return start_str, end_str
         
     except Exception as e:
         logger.error(f"Error in _get_week_range: {e}")
-        # Return the expected dates based on your example
-        return "Jul 13", "17"
+        return None, None
 
 
 def _get_product_areas_for_week(df: pd.DataFrame, week_start: str, week_end: str) -> List[str]:

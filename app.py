@@ -876,55 +876,19 @@ def handle_file_share(body, event, client: WebClient, logger):
         logger.error(f"files_info failed: {e.response['error']}")
         return
 
-    # --- NOW check for Innovation Report (file_info is available) ---
-    if ext in ("xlsx", "xls"):
-        # Check if there's an associated app_mention with innovation keywords
-        parent_text = ""
-        
-        # Try to get text from the event that triggered this file share
-        if "text" in event:
-            parent_text = event.get("text", "")
-        # Also check if there's a parent message in the body
-        elif body and "event" in body and "text" in body["event"]:
-            parent_text = body["event"].get("text", "")
-            
-        # Check for innovation report triggers
-        if any(keyword in parent_text.lower() for keyword in ["innovation report", "365 days", "innovation summary", "weekly innovation"]):
-            try:
-                # Download and parse the Excel file
-                local_path = download_slack_file(client, file_info)
-                df = extract_excel_as_table(local_path)
-                
-                # Generate the innovation report
-                report = parse_innovation_sheet(df)
-                
-                if report:
-                    send_message(
-                        client,
-                        channel_id,
-                        report,
-                        thread_ts=thread_ts,
-                        user_id=user_id
-                    )
-                else:
-                    send_message(
-                        client,
-                        channel_id,
-                        "❌ Could not generate the innovation report. Please ensure the Excel file has the required columns: Day, Date, Product Area, Title, Link to video",
-                        thread_ts=thread_ts,
-                        user_id=user_id
-                    )
-                return  # Exit early, don't process as regular Excel
-            except Exception as e:
-                logger.exception(f"Error generating innovation report: {e}")
-                send_message(
-                    client,
-                    channel_id,
-                    f"❌ Error generating innovation report: {str(e)}",
-                    thread_ts=thread_ts,
-                    user_id=user_id
-                )
-                return
+    # --- Check for Innovation Report ---
+    parent_text = ""
+    # Try to get text from the event that triggered this file share
+    if "text" in event:
+        parent_text = event.get("text", "")
+    # Also check if there's a parent message in the body
+    elif body and "event" in body and "text" in body["event"]:
+        parent_text = body["event"].get("text", "")
+    
+    # Use the new function from file_utils
+    from utils.file_utils import check_and_handle_innovation_report
+    if check_and_handle_innovation_report(ext, parent_text, client, file_info, channel_id, thread_ts, user_id):
+        return
 
     # --- Send "Indexing now..." message for regular files ---
     send_message(
