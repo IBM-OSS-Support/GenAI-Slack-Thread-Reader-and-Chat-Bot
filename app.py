@@ -25,7 +25,7 @@ from utils.slack_tools import get_user_name
 from utils.export_pdf import render_summary_to_pdf
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
-from utils.file_utils import download_slack_file, extract_text_from_file, extract_excel_as_table, dataframe_to_documents, answer_from_excel_super_dynamic
+from utils.file_utils import _is_not_found, download_slack_file, extract_text_from_file, extract_excel_as_table, dataframe_to_documents, answer_from_excel_super_dynamic
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
 from utils.vector_store import FaissVectorStore
@@ -564,7 +564,11 @@ def process_conversation(client: WebClient, event, text: str):
         r"<(https?://[^>|]+)(?:\|[^>]+)?>", r"\1", cleaned
     ).strip()
     normalized = normalized.replace("’","'").replace("‘","'").replace("“",'"').replace("”",'"')
-    m_prod = re.match(r"^-\s*(?:g\s+)?product\s+(.+)$", normalized, re.IGNORECASE)
+    m_prod = re.match(
+    r"^\s*-(?:org|askorg|org:|ask:)\s+-\s*prod(?:uct)?\s+(.+)$",
+    normalized,
+    re.IGNORECASE,
+)
     if m_prod:
         product_query = m_prod.group(1).strip()
         # Try to build a deterministic profile from Excel tables
@@ -751,22 +755,25 @@ def process_conversation(client: WebClient, event, text: str):
     if thread in EXCEL_TABLES:
         df = EXCEL_TABLES[thread]
         answer = answer_from_excel_super_dynamic(df, normalized)
-        if answer:
+
+        if answer and not _is_not_found(answer):
             reply = answer
         else:
             # Fallback to RAG/LLM as before
-            vs = THREAD_VECTOR_STORES[thread]
+            vs = THREAD_VECTOR_STORES.get(thread)
             try:
-                retrieved_docs = vs.query(normalized, k=30)
+                retrieved_docs = vs.query(normalized, k=30) if (vs and vs.index is not None) else []
             except Exception:
                 retrieved_docs = []
+
             if retrieved_docs:
                 context = "\n".join(doc.page_content for doc in retrieved_docs)
                 prompt = (
-                    f"You are a helpful data assistant. Here is data from an Excel table:\n"
+                    "You are a helpful data assistant. Here is data from an Excel table:\n"
                     f"{context}\n\n"
                     f"User question: {normalized}\n"
-                    "Only answer using the data above. If the answer is not present, say 'I can't find any match in the file.'"
+                    "Only answer using the data above. If the answer is not present, say "
+                    "'I can't find any match in the file.'"
                 )
                 reply = process_message_mcp(prompt, thread)
             else:
