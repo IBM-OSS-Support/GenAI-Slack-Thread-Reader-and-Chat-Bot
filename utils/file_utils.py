@@ -372,6 +372,96 @@ def build_product_profile_from_df(df: pd.DataFrame, product_query: str) -> str |
         lines.append(f"*• {label}:* {canon[k]}")
     return "\n".join(lines)
 
+def check_and_handle_innovation_report(ext: str, parent_text: str, client, file_info, channel_id: str, thread_ts: str, user_id: str) -> bool:
+    """
+    Check if the file upload is for innovation report generation.
+    Handles both:
+    - "generate-innovation-report" (uses last 5 entries)
+    - "generate-innovation-report 139-143" (uses specified day range)
+    
+    Returns True if handled (should exit early), False otherwise.
+    """
+    from utils.innovation_report import parse_innovation_sheet
+    from utils.slack_api import send_message
+    import logging
+    import re
+    
+    logger = logging.getLogger(__name__)
+    
+    # Only process Excel files with the specific trigger
+    if ext in ("xlsx", "xls") and "generate-innovation-report" in parent_text.lower():
+        try:
+            # Parse day range if provided
+            day_range = None
+            range_match = re.search(r'generate-innovation-report\s+(\d+)\s*-\s*(\d+)', parent_text.lower())
+            
+            if range_match:
+                start_day = int(range_match.group(1))
+                end_day = int(range_match.group(2))
+                
+                # Validate range
+                if start_day > end_day:
+                    send_message(
+                        client,
+                        channel_id,
+                        f"❌ Invalid day range: {start_day}-{end_day}. Start day must be less than or equal to end day.",
+                        thread_ts=thread_ts,
+                        user_id=user_id
+                    )
+                    return True
+                
+                day_range = (start_day, end_day)
+                logger.info(f"User requested innovation report for days {start_day} to {end_day}")
+            else:
+                logger.info("No day range specified, using default (last 5 entries)")
+            
+            # Download and parse the Excel file
+            local_path = download_slack_file(client, file_info)
+            df = extract_excel_as_table(local_path)
+            
+            # Generate the innovation report with optional day range
+            report = parse_innovation_sheet(df, day_range)
+            
+            if report:
+                send_message(
+                    client,
+                    channel_id,
+                    report,
+                    thread_ts=thread_ts,
+                    user_id=user_id
+                )
+            else:
+                send_message(
+                    client,
+                    channel_id,
+                    "❌ Could not generate the innovation report. Please ensure the Excel file has the required columns: Day#, Date, Product Area, Title, Link",
+                    thread_ts=thread_ts,
+                    user_id=user_id
+                )
+            return True  # Handled, exit early
+        except ValueError as e:
+            logger.exception(f"Value error in day range parsing: {e}")
+            send_message(
+                client,
+                channel_id,
+                f"❌ Invalid day range format. Please use: generate-innovation-report START-END (e.g., generate-innovation-report 139-143)",
+                thread_ts=thread_ts,
+                user_id=user_id
+            )
+            return True
+        except Exception as e:
+            logger.exception(f"Error generating innovation report: {e}")
+            send_message(
+                client,
+                channel_id,
+                f"❌ Error generating innovation report: {str(e)}",
+                thread_ts=thread_ts,
+                user_id=user_id
+            )
+            return True  # Handled (even if error), exit early
+    
+    return False  # Not an innovation report request
+
 def answer_from_excel_super_dynamic(df, question):
     import re as _re
     import difflib as _difflib
