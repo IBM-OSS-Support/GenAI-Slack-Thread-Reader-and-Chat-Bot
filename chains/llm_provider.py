@@ -15,12 +15,7 @@ def get_llm():
         base_url=base,
         model=model,
         temperature=0,
-        disable_streaming=True,       # single, complete message
-        num_ctx=128000,               # 128K context
-        num_predict=-1,               # no early cut-offs
-        repeat_penalty=1.05,
-        top_p=0.9,
-
+        disable_streaming=True,       # single, complete message              # 128K context
         # ✅ Turn OFF reasoning/thinking
         reasoning=False,              # do not emit thinking content
         # OR equivalently, just omit this argument entirely
