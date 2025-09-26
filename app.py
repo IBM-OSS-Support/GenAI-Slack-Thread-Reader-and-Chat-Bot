@@ -721,8 +721,8 @@ def process_conversation(client: WebClient, event, text: str):
             def _run(c: WebClient):
                 # choose default vs formatted based on your toggle
                 if cid in FORMATTED_CHANNELS:
-                    return analyze_slack_thread(c, cid, ts10, instructions=cmd, default=False)
-                return analyze_slack_thread(c, cid, ts10, instructions=cmd, default=True)
+                    return analyze_slack_thread(c, cid, ts10, instructions=cmd, default=True)
+                return analyze_slack_thread(c, cid, ts10, instructions=cmd, default=False)
 
             # Try primary team first, then the other workspace(s)
             detected_team = detect_real_team_from_event(None, event)

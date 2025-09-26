@@ -13,7 +13,7 @@ def get_llm():
     model = os.getenv("OLLAMA_MODEL_NAME", "granite3.3:8b")
     return ChatOllama(
         base_url=base,
-        model="gpt-oss:20b",
+        model=model,
         temperature=0.2,
         disable_streaming=True,       # single, complete message
         num_ctx=128000,               # 128K context
