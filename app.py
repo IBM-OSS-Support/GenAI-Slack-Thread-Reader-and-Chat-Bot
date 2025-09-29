@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 from utils.resolve_user_mentions import resolve_user_mentions
 load_dotenv()
 from utils.global_kb import index_startup_files, query_global_kb
-
+from utils.product_profile import get_product_profile
 import json
 import os
 import threading
@@ -564,9 +564,40 @@ def process_conversation(client: WebClient, event, text: str):
         r"<(https?://[^>|]+)(?:\|[^>]+)?>", r"\1", cleaned
     ).strip()
     normalized = normalized.replace("’","'").replace("‘","'").replace("“",'"').replace("”",'"')
-    m_kb = re.match(r"^(?:org|org:|askorg|ask:)\s*(.+)$", normalized, re.IGNORECASE)
+    m_prod = re.match(r"^-\s*(?:g\s+)?product\s+(.+)$", normalized, re.IGNORECASE)
+    if m_prod:
+        product_query = m_prod.group(1).strip()
+        # Try to build a deterministic profile from Excel tables
+        profile_text = get_product_profile(product_query, thread)
+        if profile_text:
+            # count as "general" usage (consistent with your -org branch)
+            if not is_followup:
+                USAGE_STATS["general_calls"] += 1
+            else:
+                USAGE_STATS["general_followups"] += 1
+            save_stats()
+
+            send_message(client, ch, profile_text, thread_ts=thread, user_id=uid)
+            return
+        else:
+            # Fallback: ask global KB as a natural question
+            # (this leverages your existing RAG + LLM grounding)
+            reply = query_global_kb(f"full_product_profile::{product_query}", thread)
+            if not is_followup:
+                USAGE_STATS["general_calls"] += 1
+            else:
+                USAGE_STATS["general_followups"] += 1
+            save_stats()
+
+            send_message(client, ch, reply, thread_ts=thread, user_id=uid)
+            return
+    m_kb = re.match(r"^(?:-org|-org:|-askorg|-ask:)\s*(.+)$", normalized, re.IGNORECASE)
     if m_kb:
         question = m_kb.group(1).strip()
+
+        # NEW: pre-analyze the question (spelling/clarity only; JSON-guardrailed; no hallucinations)
+        from chains.preanalyze import preanalyze_question
+        question = preanalyze_question(question)
         reply = query_global_kb(question, thread)
 
         # existing stats pattern (keep exactly as you use it for general Q&A)
