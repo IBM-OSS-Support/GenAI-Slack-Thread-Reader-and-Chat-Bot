@@ -1124,10 +1124,10 @@ def update_home_tab(client, event, logger):
    "text": (
        "*How it works:*\n\n"
        "1️⃣  *Chat Method:* DM me with keywords like `analyze`, `explain`, or `summarize` followed by:\n\n"
-       "     • Thread URL for thread analysis\n\n"
-       "     • `#channel-name` for channel analysis\n\n"
-       "2️⃣  *App Home Method:* Use the forms below to paste URLs or select channels directly.\n\n"
-       "3️⃣  *Get Results:* Receive structured summaries in your DMs."
+       "     • Thread URL for thread analysis (eg: `analyze https://example.slack.com/archives/CXXXXXX/p12345678` )\n\n"
+       "     • `#channel-name` for channel analysis(eg: `analyze #channel-name`)\n\n"
+    #    "2️⃣  *App Home Method:* Use the forms below to paste URLs or select channels directly.\n\n"
+    #    "3️⃣  *Get Results:* Receive structured summaries in your DMs."
    )
 }},
                     {"type": "divider"},
@@ -1136,60 +1136,61 @@ def update_home_tab(client, event, logger):
                     {"type": "section", "block_id": "invite_info", "text": {"type": "mrkdwn",
                         "text": (
                             "*Invite me to a channel:*\n\n"
-                            "• *Public:* use the selector below.\n\n"
-                            "• *Private:* type `/invite @Botico` or mention me in the channel."
+                            # "• *Public:* use the selector below.\n\n"
+                            # *Private:* 
+                            "• Type `/invite @Ask-Support` or mention me in the channel."
                         )
                     }},
                     {"type": "divider"},
 
                     # Public channel selector
-                    {"type": "section", "text": {"type": "mrkdwn",
-                        "text": "➕ *Add me to a public channel:*"
-                    }},
-                    {"type": "actions", "block_id": "public_invite", "elements": [
-                        {
-                            "type": "conversations_select",
-                            "action_id": "select_channel_to_join",
-                            "placeholder": {"type": "plain_text", "text": "Select a channel…", "emoji": True},
-                            "filter": {"include": ["public"]}
-                        }
-                    ]},
-                    {"type": "divider"},
+                    # {"type": "section", "text": {"type": "mrkdwn",
+                    #     "text": "➕ *Add me to a public channel:*"
+                    # }},
+                    # {"type": "actions", "block_id": "public_invite", "elements": [
+                    #     {
+                    #         "type": "conversations_select",
+                    #         "action_id": "select_channel_to_join",
+                    #         "placeholder": {"type": "plain_text", "text": "Select a channel…", "emoji": True},
+                    #         "filter": {"include": ["public"]}
+                    #     }
+                    # ]},
+                    # {"type": "divider"},
 
                     # Use Case: Analyze Thread
-                    {"type": "section", "block_id": "thread_section", "text": {"type": "mrkdwn",
-                        "text": (
-                            "*Use Case: Analyze a Thread*\n\n"
-                            "Paste a thread URL in the box below or mention me + URL, then click *Analyze Thread*."
-                        )
-                    }},
-                    {"type": "input", "block_id": "thread_input", "element": {
-                        "type": "plain_text_input",
-                        "action_id": "thread_url_input",
-                        "placeholder": {"type": "plain_text", "text": "Paste thread URL here..."}
-                    }, "label": {"type": "plain_text", "text": "Thread URL"}},
-                    {"type": "actions", "block_id": "thread_actions", "elements": [
-                        {"type": "button", "text": {"type": "plain_text", "text": "🚀 Analyze Thread"}, "style": "primary", "action_id": "analyze_thread_button"}
-                    ]},
-                    {"type": "divider"},
+                    # {"type": "section", "block_id": "thread_section", "text": {"type": "mrkdwn",
+                    #     "text": (
+                    #         "*Use Case: Analyze a Thread*\n\n"
+                    #         "Paste a thread URL in the box below or mention me + URL, then click *Analyze Thread*."
+                    #     )
+                    # }},
+                    # {"type": "input", "block_id": "thread_input", "element": {
+                    #     "type": "plain_text_input",
+                    #     "action_id": "thread_url_input",
+                    #     "placeholder": {"type": "plain_text", "text": "Paste thread URL here..."}
+                    # }, "label": {"type": "plain_text", "text": "Thread URL"}},
+                    # {"type": "actions", "block_id": "thread_actions", "elements": [
+                    #     {"type": "button", "text": {"type": "plain_text", "text": "🚀 Analyze Thread"}, "style": "primary", "action_id": "analyze_thread_button"}
+                    # ]},
+                    # {"type": "divider"},
 
-                    # Use Case: Analyze Channel
-                    {"type": "section", "block_id": "channel_section", "text": {"type": "mrkdwn",
-                        "text": (
-                            "*Use Case: Analyze a Channel*\n\n"
-                            "Type `analyze #channel-name` in DM or select below, then click *Analyze Channel*."
-                        )
-                    }},
-                    {"type": "actions", "block_id": "channel_input_block", "elements": [
-                        {
-                            "type": "conversations_select",
-                            "action_id": "analyze_channel_select",
-                            "placeholder": {"type": "plain_text", "text": "Select a channel…"},
-                            "filter": {"include": ["public", "private"]}
-                        },
-                        {"type": "button", "text": {"type": "plain_text", "text": "🚀 Analyze Channel"}, "style": "primary", "action_id": "analyze_channel_button"}
-                    ]},
-                    {"type": "divider"},
+                    # # Use Case: Analyze Channel
+                    # {"type": "section", "block_id": "channel_section", "text": {"type": "mrkdwn",
+                    #     "text": (
+                    #         "*Use Case: Analyze a Channel*\n\n"
+                    #         "Type `analyze #channel-name` in DM or select below, then click *Analyze Channel*."
+                    #     )
+                    # }},
+                    # {"type": "actions", "block_id": "channel_input_block", "elements": [
+                    #     {
+                    #         "type": "conversations_select",
+                    #         "action_id": "analyze_channel_select",
+                    #         "placeholder": {"type": "plain_text", "text": "Select a channel…"},
+                    #         "filter": {"include": ["public", "private"]}
+                    #     },
+                    #     {"type": "button", "text": {"type": "plain_text", "text": "🚀 Analyze Channel"}, "style": "primary", "action_id": "analyze_channel_button"}
+                    # ]},
+                    # {"type": "divider"},
 
                     # Use Case: Document Q&A
                     {"type": "section", "block_id": "file_section", "text": {"type": "mrkdwn",
@@ -1211,6 +1212,18 @@ def update_home_tab(client, event, logger):
                         )
                     }},
                     {"type": "divider"},
+                    {"type": "section", "block_id": "orgkb_section", "text": {"type": "mrkdwn",
+    "text": (
+        "*Use Case: Persistent Knowledge Base*\n\n"
+        "Access your already-loaded, org-wide knowledge base right from a DM or channel.\n"
+        "Use the `-org` command at the *start* of your message, followed by your question.\n\n"
+        "*What you can do:*\n"
+        "• *Ask a question:* `-org who is the support owner for <ProductName>?`\n\n"
+        "_Tip: Always start with `-org`. In channels, remember to @mention the bot (e.g., `@Ask-Support -org ...`). "
+        "In a DM, mentioning isn’t required._"
+    )
+}},
+{"type": "divider"},
 
                     # Features summary
                     {"type": "section", "text": {"type": "mrkdwn",
@@ -1224,6 +1237,54 @@ def update_home_tab(client, event, logger):
                         )
                     }},
                     {"type": "divider"},
+                        {"type": "divider"},
+                
+
+    # FAQ Section
+    {"type": "header", "text": {"type": "plain_text", "text": "Frequently Asked Questions", "emoji": True}},
+    
+    {
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": (
+                "*Q1. I tried to analyze a thread or channel, but it's not working.*\n"
+                "Make sure the bot has been **invited to that channel** first. "
+                "Without being a member, the bot cannot access messages or perform analysis. "
+                "Invite it using `/invite @Ask-Support`."
+            )
+        }
+    },
+    {"type": "divider"},
+
+    {
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": (
+                "*Q2. I uploaded a file, but it didn’t give a proper response.*\n"
+                "Currently, the bot supports **PDF, TXT, CSV, and XLSX** files only. "
+                "Other file formats like DOCX or PPTX are not yet supported — stay tuned for future updates."
+            )
+        }
+    },
+    {"type": "divider"},
+
+    {
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": (
+                "*Q3. I asked a question in a channel, but the bot didn’t reply.*\n"
+                "*When messaging **in a channel**, always **@mention the bot** "
+                "(e.g., `@Ask-Support summarize this thread`). "
+                "In DMs, you don’t need to mention it. "
+                "In thread replies inside a channel, also ensure you mention the bot to trigger its response."
+            )
+        }
+    },
+
+    {"type": "divider"},
 
                     # Footer / Help
                     # {"type": "context", "elements": [
