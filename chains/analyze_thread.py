@@ -8,7 +8,7 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from tenacity import retry, wait_random_exponential, stop_after_attempt
+from tenacity import retry, wait_random_exponential, stop_after_attempt, retry_if_exception_type
 
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
@@ -28,57 +28,64 @@ from utils.slack_tools import fetch_slack_thread, get_user_name
 logger = logging.getLogger(__name__)
 
 # -----------------------------------------------------------------------------
-# Prompts (content unchanged)
+# Prompts (simplified, no stop markers, no “concise” caps)
 # -----------------------------------------------------------------------------
 
 SUMMARY_SYSTEM = (
-    "You are a Slack assistant that must produce output with exactly five sections "
-    "in Slack markdown. Never add commentary, headers, or code fences outside the sections. "
-    "Never invent timestamps or facts. Keep body text unbolded. If a section has no facts, "
-    "omit its bullets rather than inventing content."
+    "You are a Slack assistant that must produce output with exactly five sections. "
+    "Do not add commentary, extra headers, or code fences. "
+    "Never invent timestamps or facts. If a section has no facts, print the heading with no bullets."
 )
 
-SUMMARY_HUMAN = """
+SUMMARY_HUMAN ="""
 You are a Slack assistant summarizing internal support or escalation threads. Below is the full message thread with speakers and timestamps:
 
 {messages}
 
-Your output must contain *exactly these five sections*, using *Slack markdown formatting* (asterisks for bold section titles, no bold in body). Do not add anything outside these sections. Do not add explanations. 
+Your output must contain *exactly these five sections*, using *Slack markdown formatting* (asterisks for bold section titles, no bold in body). Do not add anything outside these sections. Do not add explanations. Do not echo or quote the input thread. Do not include placeholders.
 
 *Summary*  
-- Write *one clear sentence* summarizing the entire thread. Be specific about what triggered the thread (e.g., escalation, request, incident).
+- Write *one clear sentence* summarizing the entire thread. Be specific about what triggered the thread (e.g., escalation, request, incident). If the thread explicitly states a final status (e.g., resolved/closed), end the sentence with that status.
 
 *Business Impact*  
 - Only include bullets for impacts *explicitly mentioned in the thread*.  
-- Use the following bullet format:
-  - *Revenue at risk*: Describe risk to Watson or IBM revenue.
-  - *Operational impact*: Describe what is blocked or degraded.
-  - *Customer impact*: Describe how the customer is affected, including any leadership mention (e.g., CIO-level).
-  - *Team impact*: Mention any IBM team concerns, delays, or credibility issues.
-  - *Other impacts*: List any escalation triggers (e.g., Duty Manager contacted, credibility risk, etc.)
+- Use the following bullet format (omit any bullet that is not explicitly stated in the thread; do not invent):  
+  - *Revenue at risk*: Describe risk to Watson or IBM revenue.  
+  - *Operational impact*: Describe what is blocked or degraded.  
+  - *Customer impact*: Describe how the customer is affected, including any leadership mention (e.g., CIO-level).  
+  - *Team impact*: Mention any IBM team concerns, delays, or credibility issues.  
+  - *Other impacts*: List any escalation triggers (e.g., Duty Manager contacted, SLO breach, credibility risk).
 
 *Key Points Discussed*  
-- List 3–6 bullets summarizing specific events, facts, or updates.  
-- Focus on what was done, requested, stated, or observed.  
-- Use speaker names *only* if it clarifies the point.  
-- Do not add any information not present in the thread.
+- List 3–6 bullets (prefer 4–5) summarizing specific events, facts, or updates.  
+- Each bullet must map to a specific message (what was done, requested, stated, or observed).  
+- Use speaker names or @handles *only* if it clarifies the point; otherwise omit.  
+- If the thread contains a relevant URL, include at most one URL *in that bullet* using Slack markup `<url>` (no link titles).  
+- Do not add any information not present in the thread. Do not infer causes or solutions.
 
 *Decisions Made*  
-- List *all concrete decisions*, even logistical ones (like scheduling a call or taking ownership).  
+- List *all concrete decisions*, even logistical ones (like taking ownership or explicitly monitoring).  
+- A decision requires explicit commitment phrasing in the thread (“I/we will…”, “decided to…”, “took ownership”, “bookmarked to monitor”).  
+- Include a timestamp only if the thread provides an absolute date and time for that decision. Convert to UTC *only if the source timezone is explicit*; otherwise omit the timestamp.  
 - Use this format:
   - *@username* decided to ___ [DD/MM/YYYY HH:MM UTC]
 
 *Action Items*  
-- List only *clearly stated follow-up actions* assigned to specific people.  
+- List only *clearly stated follow-up actions* assigned to specific people using explicit assignment in the thread.  
+- Do not include generic or implied tasks (e.g., “we should”).  
+- Include a timestamp only if the thread provides an absolute date and time for that action. Convert to UTC *only if the source timezone is explicit*; otherwise omit the timestamp.  
 - Use this format:
-  - *@username* to ___ [DD/MM/YYYY HH:MM UTC]  
-- Include due-dates only if explicitly mentioned. Do not guess or infer.
+  - *@username* to ___ [DD/MM/YYYY HH:MM UTC]
 
 ---
 
-Strictly follow the format. Do *not invent* any bullet or timestamp. If something is missing, leave it out—do not assume. Format all of your output using Slack’s markup.
+Strict rules (apply to all sections):
+- Use Slack handles exactly as written (e.g., @ken_wakefield). If a handle is not present, use the display name exactly; do not create or guess handles.  
+- Keep all numbers, versions, units, and currency *exactly as written* (e.g., 10×, 11.0.0.0_IF1, 1000000 SAS). Do not reformat or convert unless the thread explicitly does so.  
+- Do not infer or assume anything not explicitly stated (no guessed owners, due dates, causes, or resolutions).  
+- If a section would otherwise be empty, leave it with no bullets.  
+- Use only hyphen bullets (`- `). Do not add extra blank lines before or after sections.
 """
-
 CUSTOM_SYSTEM = """You are a helpful assistant working on Slack threads."""
 CUSTOM_HUMAN = """Here is a Slack thread:
 
@@ -87,15 +94,66 @@ CUSTOM_HUMAN = """Here is a Slack thread:
 User instructions:
 {instructions}
 
-Follow the instructions exactly and respond in plain text."""
+Follow the instructions exactly and respond in plain text.
+Do not echo or quote the input thread.
+"""
 
 TRANSLATE_SYSTEM = """You translate Slack markdown preserving formatting."""
 TRANSLATE_HUMAN = """Translate the following Slack message to {language}, preserving all markdown:
 
 ```{text}```"""
 
+DEFAULT_FIVE_SECTION_INSTR ="""
+You are a Slack assistant summarizing internal support or escalation threads. Below is the full message thread with speakers and timestamps:
+
+{messages}
+
+Your output must contain *exactly these five sections*, using *Slack markdown formatting* (asterisks for bold section titles, no bold in body). Do not add anything outside these sections. Do not add explanations. Do not echo or quote the input thread. Do not include placeholders.
+
+*Summary*  
+- Write *one clear sentence* summarizing the entire thread. Be specific about what triggered the thread (e.g., escalation, request, incident). If the thread explicitly states a final status (e.g., resolved/closed), end the sentence with that status.
+
+*Business Impact*  
+- Only include bullets for impacts *explicitly mentioned in the thread*.  
+- Use the following bullet format (omit any bullet that is not explicitly stated in the thread; do not invent):  
+  - *Revenue at risk*: Describe risk to Watson or IBM revenue.  
+  - *Operational impact*: Describe what is blocked or degraded.  
+  - *Customer impact*: Describe how the customer is affected, including any leadership mention (e.g., CIO-level).  
+  - *Team impact*: Mention any IBM team concerns, delays, or credibility issues.  
+  - *Other impacts*: List any escalation triggers (e.g., Duty Manager contacted, SLO breach, credibility risk).
+
+*Key Points Discussed*  
+- List 3–6 bullets (prefer 4–5) summarizing specific events, facts, or updates.  
+- Each bullet must map to a specific message (what was done, requested, stated, or observed).  
+- Use speaker names or @handles *only* if it clarifies the point; otherwise omit.  
+- If the thread contains a relevant URL, include at most one URL *in that bullet* using Slack markup `<url>` (no link titles).  
+- Do not add any information not present in the thread. Do not infer causes or solutions.
+
+*Decisions Made*  
+- List *all concrete decisions*, even logistical ones (like taking ownership or explicitly monitoring).  
+- A decision requires explicit commitment phrasing in the thread (“I/we will…”, “decided to…”, “took ownership”, “bookmarked to monitor”).  
+- Include a timestamp only if the thread provides an absolute date and time for that decision. Convert to UTC *only if the source timezone is explicit*; otherwise omit the timestamp.  
+- Use this format:
+  - *@username* decided to ___ [DD/MM/YYYY HH:MM UTC]
+
+*Action Items*  
+- List only *clearly stated follow-up actions* assigned to specific people using explicit assignment in the thread.  
+- Do not include generic or implied tasks (e.g., “we should”).  
+- Include a timestamp only if the thread provides an absolute date and time for that action. Convert to UTC *only if the source timezone is explicit*; otherwise omit the timestamp.  
+- Use this format:
+  - *@username* to ___ [DD/MM/YYYY HH:MM UTC]
+
+---
+
+Strict rules (apply to all sections):
+- Use Slack handles exactly as written (e.g., @ken_wakefield). If a handle is not present, use the display name exactly; do not create or guess handles.  
+- Keep all numbers, versions, units, and currency *exactly as written* (e.g., 10×, 11.0.0.0_IF1, 1000000 SAS). Do not reformat or convert unless the thread explicitly does so.  
+- Do not infer or assume anything not explicitly stated (no guessed owners, due dates, causes, or resolutions).  
+- If a section would otherwise be empty, leave it with no bullets.  
+- Use only hyphen bullets (`- `). Do not add extra blank lines before or after sections.
+"""
 # -----------------------------------------------------------------------------
-# Build both chat and text prompts (content kept the same)
+# Build both chat and text prompts
 # -----------------------------------------------------------------------------
 
 # Chat prompts
@@ -109,7 +167,7 @@ translate_chat_prompt = ChatPromptTemplate.from_messages(
     [("system", TRANSLATE_SYSTEM), ("human", TRANSLATE_HUMAN)]
 )
 
-# Text prompts (system baked into single template)
+# Text prompts
 summary_text_prompt = PromptTemplate.from_template(
     "SYSTEM:\n" + SUMMARY_SYSTEM + "\n\nUSER:\n" + SUMMARY_HUMAN
 )
@@ -127,7 +185,7 @@ translate_text_prompt = PromptTemplate.from_template(
 llm = get_llm()  # may be ChatOllama (chat) or Ollama (text)
 parser = StrOutputParser()
 
-# Choose chat vs text chains at runtime (only change needed for web/LLM side)
+# Single, clean wiring with NO caps and NO stop sequences
 if is_chat_model(llm):
     summary_chain: Runnable = summary_chat_prompt | llm | parser
     custom_chain: Runnable = custom_chat_prompt | llm | parser
@@ -138,7 +196,7 @@ else:
     translation_chain: Runnable = translate_text_prompt | llm | parser
 
 # -----------------------------------------------------------------------------
-# Main functions (unchanged behavior)
+# Helpers
 # -----------------------------------------------------------------------------
 
 def _build_thread_blob(client: WebClient, messages: list[dict]) -> str:
@@ -155,18 +213,15 @@ def _build_thread_blob(client: WebClient, messages: list[dict]) -> str:
         lines.append(f"{human_ts} {speaker}: {text}")
     return resolve_user_mentions(client, "\n".join(lines))
 
-from tenacity import retry, wait_random_exponential, stop_after_attempt, retry_if_exception_type
-
 class EmptyLLMOutput(RuntimeError):
     pass
 
 def _trim_messages_blob(s: str, max_chars: int = 6000) -> str:
-    """Keep the tail of the thread (often the most relevant)."""
+    """Unused in normal flow; kept only for retry fallback below."""
     if not isinstance(s, str):
         return s
     if len(s) <= max_chars:
         return s
-    # Try to avoid cutting a line mid-way
     tail = s[-max_chars:]
     nl = tail.find("\n")
     return tail[nl+1:] if nl != -1 else tail
@@ -179,18 +234,19 @@ def _trim_messages_blob(s: str, max_chars: int = 6000) -> str:
 def _invoke_chain(chain: Runnable, /, **inputs) -> str:
     """
     Invoke the chain; if the model returns an empty string, raise to trigger a retry.
-    On the 2nd attempt we trim the messages blob (to dodge ctx/decoding edge-cases).
+    On the 2nd attempt we trim the messages blob to dodge rare ctx/decoding edge-cases.
+    First attempt always uses the full input.
     """
     attempt = getattr(_invoke_chain, "_attempt", 1)
 
-    # 1) First try with original inputs
+    # 1) First try with original inputs (full input, no trimming)
     out = chain.invoke(inputs)
     text = (out or "").strip()
     if text:
         _invoke_chain._attempt = 1  # reset
         return text
 
-    # 2) Empty → try again with a trimmed blob (only once per call stack)
+    # 2) Empty → try again with a trimmed blob (one-time, fallback only)
     msg_key = "messages" if "messages" in inputs else ("text" if "text" in inputs else None)
     if msg_key and attempt == 1 and isinstance(inputs[msg_key], str):
         logger.warning("LLM returned empty output; retrying with trimmed messages blob.")
@@ -208,6 +264,9 @@ def _invoke_chain(chain: Runnable, /, **inputs) -> str:
     _invoke_chain._attempt = attempt + 1
     raise EmptyLLMOutput("Model returned empty output")
 
+# -----------------------------------------------------------------------------
+# Main
+# -----------------------------------------------------------------------------
 
 def analyze_slack_thread(
     client: WebClient,
@@ -226,19 +285,20 @@ def analyze_slack_thread(
     except Exception as e:
         raise RuntimeError(f"Error fetching thread: {e}")
 
+    # NO trimming here: send full thread to the model
     blob = _build_thread_blob(client, raw)
 
     try:
+        # Inside analyze_slack_thread, in the custom branch:
         if default:
-            # STRICT summary (the 5-section format)
             return _invoke_chain(summary_chain, messages=blob)
         else:
-            # Custom instructions
-            return _invoke_chain(custom_chain, messages=blob, instructions=instructions or "")
+            instr_text = instructions.strip() if instructions and instructions.strip() else DEFAULT_FIVE_SECTION_INSTR
+            return _invoke_chain(custom_chain, messages=blob, instructions=instr_text)
+
     except Exception as e:
         logger.exception("Summarization failed")
         return "❌ Sorry, I couldn't process your request."
-
 
 def translate_slack_markdown(text: str, language: str) -> str:
     try:
