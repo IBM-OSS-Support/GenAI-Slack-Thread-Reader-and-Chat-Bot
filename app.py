@@ -264,34 +264,49 @@ def handle_language_selection(ack, body, logger):
 
 @app.action("translate_button")
 def handle_translate_click(ack, body, client, logger):
-    # 1) Ack
+    # Ack immediately so Bolt doesn't complain about timeouts
     ack()
+    try:
+        # 1) Language choice
+        state_vals = body.get("state", {}).get("values", {}).get("translate_controls", {})
+        lang = (
+            state_vals.get("select_language", {})
+            .get("selected_option", {})
+            .get("value", "en")
+        )
 
-    # 2) Language choice
-    state_vals = body["state"]["values"]["translate_controls"]
-    lang = state_vals["select_language"]["selected_option"]["value"]
+        # 2) Reconstruct the original markdown text robustly
+        orig_blocks = body.get("message", {}).get("blocks", []) or []
+        sections = []
+        for blk in orig_blocks:
+            if blk.get("type") == "section":
+                text_obj = blk.get("text") or {}
+                if text_obj.get("type") == "mrkdwn" and "text" in text_obj:
+                    sections.append(text_obj["text"])
+        original_text = "\n".join(sections).strip()
 
-    # 3) Reconstruct original markdown text
-    orig_blocks = body["message"]["blocks"]
-    original_text = "\n".join(
-        blk["text"]["text"]
-        for blk in orig_blocks
-        if blk.get("type") == "section"
-           and isinstance(blk.get("text"), dict)
-           and blk["text"].get("type") == "mrkdwn"
-    )
+        # 3) Translate via LangChain Runnable (use invoke, not run)
+        # If you prefer your retry/trim logic, call: _invoke_chain(translation_chain, text=original_text, language=lang)
+        translated = (translation_chain.invoke({"text": original_text, "language": lang}) or "").strip()
+        translated = translated.replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
 
-    # 4) Translate via LLMChain
-    translated = translation_chain.run(text=original_text, language=lang).replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
+        # 4) Post the translation
+        send_message(
+            client,
+            body["channel"]["id"],
+            f":earth_asia: *Translation ({lang}):*\n{translated}",
+            thread_ts=body["message"]["ts"],
+            user_id=None,
+            export_pdf=False,
+        )
+    except Exception:
+        logger.exception("Translation failed")
+        client.chat_postMessage(
+            channel=body.get("channel", {}).get("id"),
+            thread_ts=body.get("message", {}).get("ts"),
+            text="❌ Sorry, translation failed."
+        )
 
-    send_message(
-        client,
-        body["channel"]["id"],
-        f":earth_asia: *Translation ({lang}):*\n{translated}",
-        body["message"]["ts"],
-        None,
-        False,  # NEW: allow PDF export of translations
-    )
 def load_stats():
     try:
         with open(STATS_FILE) as f:

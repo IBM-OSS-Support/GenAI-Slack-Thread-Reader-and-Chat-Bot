@@ -275,7 +275,9 @@ def analyze_slack_thread(
         return "❌ Sorry, I couldn't process your request."
 def translate_slack_markdown(text: str, language: str) -> str:
     try:
+        # use your retrying helper that already wraps .invoke()
         return _invoke_chain(translation_chain, text=text, language=language)
     except Exception:
         logger.exception("Translation failed")
-        return text  # graceful fallback
+        return text
+
