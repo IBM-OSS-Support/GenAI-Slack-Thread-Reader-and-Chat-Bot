@@ -136,7 +136,7 @@ def parse_innovation_sheet(df: pd.DataFrame, day_range: Optional[Tuple[int, int]
         message_parts = []
         
         # Header with emotes
-        message_parts.append(":culture-innovation: *365 Days of Innovation* :culture-innovation:\n")
+        message_parts.append(":culture-innovation: *365 Days of Innovation* :culture-innovation:")
         
         # Summary section - always use date range from actual dates
         if week_start and week_end:
@@ -161,22 +161,22 @@ def parse_innovation_sheet(df: pd.DataFrame, day_range: Optional[Tuple[int, int]
             if day_range:
                 message_parts.append(
                     f"Last week's demos ({date_str}) included sessions on {areas_str}. "
-                    "Even more innovation is coming this week!\n"
+                    "Even more innovation is coming this week!"
                 )
             else:
                 message_parts.append(
                     f"Last week's demos ({date_str}) included sessions on {areas_str}. "
-                    "Even more innovation is coming this week!\n"
+                    "Even more innovation is coming this week!"
                 )
         else:
             if day_range:
                 message_parts.append(
-                    f"Last week's demos ({date_str}):\n"
+                    f"Last week's demos ({date_str}):"
                 )
             else:
                 message_parts.append(
                     f"Last week's demos ({date_str}) showcased amazing innovations. "
-                    "Even more is coming this week!\n"
+                    "Even more is coming this week!"
                 )
         
         # Add each day's entry with hyperlinked title using BLOG LINK
