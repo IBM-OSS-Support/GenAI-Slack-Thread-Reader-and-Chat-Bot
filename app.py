@@ -770,14 +770,14 @@ def process_conversation(client: WebClient, event, text: str):
                     return analyze_slack_thread(
                         c, cid, ts10,
                         instructions=cmd,
-                        default= True,
+                        default= False,
                         progress_card_cb=lambda pct, note: card.set(pct, note),
                         time_bump=lambda: card.maybe_time_bumps(),
                     )
                 return analyze_slack_thread(
                         c, cid, ts10,
                         instructions=cmd,
-                        default=False,
+                        default=True,
                         progress_card_cb=lambda pct, note: card.set(pct, note),
                         time_bump=lambda: card.maybe_time_bumps(),
                     )
