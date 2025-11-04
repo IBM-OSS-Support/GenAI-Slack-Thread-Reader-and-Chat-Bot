@@ -39,6 +39,7 @@ from chains.analyze_thread import translation_chain
 from utils.health import health_app, run_health_server
 from utils.innovation_report import parse_innovation_sheet
 logging.basicConfig(level=logging.DEBUG)
+from utils.usage_guide import get_usage_guide
 
 
 # Instantiate a single global vector store
@@ -551,38 +552,6 @@ def get_bot_stats():
         f"👍 *{_vote_up_count}*   👎 *{_vote_down_count}*"
     )
 
-# Usage Details
-def get_usage_guide():
-    return (
-        "📚 *Ask-Support Bot — Quick Start Guide*\n"
-        "Use me anywhere: DMs, channels, or threads. In channels, always mention me with `@Ask-Support`.\n\n"
-
-        "*1️⃣ Analyze Thread → Get Thread URL First*\n"
-        "• _In any thread_, click the ••• (three dots) → “*Copy link*”\n"
-        "• Paste it with an action word like `analyze`, `summarize`, or `explain`\n"
-        "→ Example: `@Ask-Support analyze https://your-workspace.slack.com/archives/CXXXXXX/p123456789012345`\n\n"
-
-        "*2️⃣ Analyze Channel → Use Exact #channel-name* (e.g., `#general`)\n"
-        "• Right click the channel name → Click on Copy → Click on Copy name.\n"
-        "• Paste it with an action word like `analyze`, `summarize`, or `explain`\n"
-        "→ Example: `@Ask-Support analyze #general`\n\n"
-
-        "*3️⃣ Summarize & Q&A on Files (PDF/TXT/CSV/XLSX)*\n"
-        "Upload a file → ask questions in-thread:\n"
-        "• _In any DM or channel thread_, click ➕ → “*Upload from computer*”\n"
-        "• Select your file (PDF, TXT, CSV, or XLSX)\n"
-        "• After upload, reply in the same thread: `What are the key points?`\n"
-        "• I’ll index it and answer based on content — no need to mention me in DMs!\n\n"
-
-        "*4️⃣ Ask Anything (General Q&A)*\n"
-        "Ask me anything — I’ll respond using my training and latest data:\n"
-        "• In DMs: Just type your question (no mention needed)\n"
-        "• In channels: Always start with `@Ask-Support`\n"
-        "→ Examples:\n"
-        "  - `@Ask-Support What’s the status of Watsonx support?`\n"
-        "  - `Explain how escalation workflows work.` (in DM)\n\n"
-    )
-
 def process_conversation(client: WebClient, event, text: str):
     ch      = event["channel"]
     ts      = event["ts"]
@@ -689,7 +658,7 @@ def process_conversation(client: WebClient, event, text: str):
 
     # Usage guide command
     normalized_text = resolve_user_mentions(client, cleaned).strip().lower()
-    if normalized_text in ("usage", "help") or normalized_text.startswith(("usage ", "help ")):
+    if normalized_text in ("usage", "help"):
         send_message(
             client,
             ch,
