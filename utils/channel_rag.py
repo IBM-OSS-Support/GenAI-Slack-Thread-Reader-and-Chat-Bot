@@ -8,7 +8,7 @@ import json
 import logging
 import asyncio
 from contextlib import contextmanager
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Callable
 
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -239,11 +239,17 @@ class UserNameCache:
 async def _fetch_history_paginated(
     client: AsyncWebClient,
     channel_id: str,
-    limit_per_page: int = 200
+    limit_per_page: int = 200,
+    # optional progress reporting over a percentage segment
+    progress_cb: Optional[Callable[[int, str], None]] = None,
+    pct_start: int = 10,
+    pct_end: int = 50,
 ) -> List[dict]:
     """Fetch all parent messages (exclude replies here)."""
     parents, cursor, page_count, msg_count = [], None, 0, 0
     with timed("fetch_channel_history"):
+        # We won’t know total pages up front; we’ll approximate using a soft cap
+        hard_cap = 8000  # used to scale progress updates
         while True:
             resp = await _call_with_retry(
                 client.conversations_history,
@@ -263,11 +269,21 @@ async def _fetch_history_paginated(
             msg_count += page_msgs
             page_count += 1
             logger.info(f"History page {page_count}: +{page_msgs} parents (cum {msg_count})")
+
+            # smooth progress within [pct_start, pct_end]
+            if progress_cb:
+                span = max(0, pct_end - pct_start)
+                pct = pct_start + min(span, int((msg_count / hard_cap) * span))
+                progress_cb(pct, f"Scanning channel history… ({msg_count} messages)")
+
             cursor = (resp.get("response_metadata") or {}).get("next_cursor")
             if not cursor:
                 break
 
     parents.sort(key=lambda m: float(m["ts"]))
+    # ensure we land on pct_end when history is done
+    if progress_cb:
+        progress_cb(pct_end, f"History scanned. ({len(parents)} parent messages)")
     return parents
 
 async def _fetch_replies_for_parent(
@@ -387,31 +403,48 @@ def _invoke_chain(chain: Runnable, /, **inputs) -> str:
 async def analyze_entire_channel_async(
     token: str,
     channel_id: str,
-    thread_ts: str  # API parity; not used in full-channel mode
+    thread_ts: str,  # API parity; not used in full-channel mode
+    # optional progress/ticker callbacks (match thread progress API)
+    progress_card_cb: Optional[Callable[[int, str], None]] = None,
+    time_bump: Optional[Callable[[], None]] = None,
 ) -> str:
-    """
-    1) Fetch parents & replies (strict order)
-    2) For each message/reply, convert <@U…> to @Display Name
-    3) Build **minimal JSON** with: thread_id, user_name, text, posted_date, posted_time (+ replies[])
-       - posted_date format: 'DD Month 2025'
-       - posted_time format: 'HH:MM IST'
-    4) (Optional) Run LLM if you still want a summary
-    """
+
+    def step(p: int, msg: str):
+        if progress_card_cb:
+            try:
+                progress_card_cb(max(0, min(100, int(p))), msg)
+            except Exception:
+                pass
+
     total_start = time.perf_counter()
     logger.info(f"Starting analyze_entire_channel(async) | channel_id={channel_id} thread_ts={thread_ts}")
+
+    # 0) Start
+    step(5, "Preparing channel analysis…")
 
     client = AsyncWebClient(token=token)
     name_cache = UserNameCache()
 
-    # 1) Fetch
-    parents = await _fetch_history_paginated(client, channel_id)
+    # 1) Fetch parents (with progress 10→50)
+    parents = await _fetch_history_paginated(
+        client,
+        channel_id,
+        limit_per_page=200,
+        progress_cb=progress_card_cb,
+        pct_start=10,
+        pct_end=50,
+    )
     if not parents:
         logger.warning(f"No messages found in <#{channel_id}>.")
+        step(100, "No messages found.")
         return f":warning: No messages found in <#{channel_id}>."
 
+    # 2) Fetch replies concurrently
+    step(55, "Collecting thread replies…")
     replies_map = await _fetch_all_replies_concurrent(client, channel_id, parents, max_concurrency=12)
 
-    # 2) Resolve names + mentions; build minimal JSON
+    # 3) Resolve names + mentions; build minimal JSON
+    step(62, "Compiling content…")
     with timed("build_minimal_json", extra={
         "parents": len(parents),
         "total_replies": sum(len(v) for v in replies_map.values())
@@ -483,18 +516,41 @@ async def analyze_entire_channel_async(
                 rec["replies"] = rs
             minimal.append(rec)
 
-    # 3) Prepare JSON string for LLM (prompt explicitly asks for JSON input)
+    # 4) Prepare JSON string for LLM (prompt explicitly asks for JSON input)
     with timed("prepare_llm_json"):
-        # Compact but readable JSON (no extra whitespace needed for model)
         json_input = json.dumps(minimal, ensure_ascii=False)
 
-    # 4) Summarize via LLM with robust empty-output handling
+    # 5) Run model with a gentle ticker for perceived progress
+    step(70, "Running analysis…")
+    start = time.time()
+
+    def _ticker():
+        # raise perceived progress while LLM is thinking
+        while True:
+            if time_bump:
+                try:
+                    time_bump()
+                except Exception:
+                    pass
+            # stop nudging after ~12s
+            if time.time() - start > 12:
+                break
+            time.sleep(0.5)
+
+    t = None
+    if time_bump:
+        import threading
+        t = threading.Thread(target=_ticker, daemon=True)
+        t.start()
+
     with timed("llm_summary"):
         try:
             # Use retrying invoke (aligned with analyze_thread)
             result = await asyncio.to_thread(_invoke_chain, channel_summary_chain, messages=json_input)
+            step(100, "Completed.")
         except Exception as e:
             logger.error(f"Failed to summarize channel <#{channel_id}>: {e}")
+            step(100, "Failed during model call.")
             result = f"❌ Failed to summarize channel <#{channel_id}>: {e}"
 
     total_elapsed = time.perf_counter() - total_start
@@ -548,14 +604,24 @@ async def _persist_min_json(min_records: List[Dict[str, object]], channel_id: st
     return await asyncio.to_thread(_write, min_records)
 
 # -----------------------------------------------------------------------------
-# Sync wrapper (if your callers pass a sync WebClient)
+# Sync wrapper (backward-compatible; optional callbacks supported)
 # -----------------------------------------------------------------------------
 def analyze_entire_channel(
     client: WebClient,
     channel_id: str,
-    thread_ts: str
+    thread_ts: str,
+    progress_card_cb: Optional[Callable[[int, str], None]] = None,
+    time_bump: Optional[Callable[[], None]] = None,
 ) -> str:
     token = getattr(client, "token", None)
     if not token:
         raise ValueError("WebClient missing token")
-    return asyncio.run(analyze_entire_channel_async(token, channel_id, thread_ts))
+    return asyncio.run(
+        analyze_entire_channel_async(
+            token=token,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            progress_card_cb=progress_card_cb,
+            time_bump=time_bump,
+        )
+    )

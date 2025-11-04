@@ -1,5 +1,6 @@
 # chains/analyze_thread.py
 from __future__ import annotations
+from typing import Optional, Callable
 
 import logging
 import os
@@ -209,40 +210,74 @@ def _invoke_chain(chain: Runnable, /, **inputs) -> str:
     raise EmptyLLMOutput("Model returned empty output")
 
 
+
 def analyze_slack_thread(
     client: WebClient,
     channel_id: str,
     thread_ts: str,
     instructions: Optional[str] = None,
     default: bool = True,
+    progress_card_cb: Optional[Callable[[int, str], None]] = None,
+    time_bump: Optional[Callable[[], None]] = None,
 ) -> str:
     """
-    Fetch the Slack thread, build a chat-friendly blob, and run the appropriate chain.
-    default=True  -> use the STRICT summary formatter
-    default=False -> use the custom instructions formatter
+    default=True  -> strict 5-section summary
+    default=False -> custom instructions formatter
+
+    progress_card_cb(percent:int, subtitle:str): update the Block Kit progress card
+    time_bump(): invoke to nudge time-based bumps (5s→75, 10s→90)
     """
     try:
+        if progress_card_cb:
+            progress_card_cb(10, "Fetching Slack messages…")
         raw = fetch_slack_thread(client, channel_id, thread_ts)
+        if progress_card_cb:
+            progress_card_cb(50, f"Fetched {len(raw)} messages.")
     except Exception as e:
+        if progress_card_cb:
+            progress_card_cb(100, "Failed during fetch.")
         raise RuntimeError(f"Error fetching thread: {e}")
 
     blob = _build_thread_blob(client, raw)
 
+    # Model phase (50→100) with a lightweight ticker for time-based bumps
+    start = time.time()
+    def _ticker():
+        while True:
+            if time_bump:
+                time_bump()
+            if time.time() - start > 12:  # stop after ~12s
+                break
+            time.sleep(0.5)
+
     try:
+        t = None
+        if time_bump:
+            import threading
+            t = threading.Thread(target=_ticker, daemon=True)
+            t.start()
+
+        if progress_card_cb:
+            progress_card_cb(60, "Dispatching to model…")
+
         if default:
-            # STRICT summary (the 5-section format)
-            return _invoke_chain(summary_chain, messages=blob)
+            out = _invoke_chain(summary_chain, messages=blob)
         else:
-            # Custom instructions
-            return _invoke_chain(custom_chain, messages=blob, instructions=instructions or "")
-    except Exception as e:
+            out = _invoke_chain(custom_chain, messages=blob, instructions=instructions or "")
+
+        if progress_card_cb:
+            progress_card_cb(100, "Completed.")
+        return out
+    except Exception:
         logger.exception("Summarization failed")
+        if progress_card_cb:
+            progress_card_cb(100, "Failed during model call.")
         return "❌ Sorry, I couldn't process your request."
-
-
 def translate_slack_markdown(text: str, language: str) -> str:
     try:
+        # use your retrying helper that already wraps .invoke()
         return _invoke_chain(translation_chain, text=text, language=language)
     except Exception:
         logger.exception("Translation failed")
-        return text  # graceful fallback
+        return text
+

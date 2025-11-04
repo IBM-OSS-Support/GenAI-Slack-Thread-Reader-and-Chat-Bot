@@ -1,5 +1,7 @@
 from dotenv import load_dotenv
 
+from utils.progress_bar import ProgressBar
+from utils.progress_card import ProgressCard
 from utils.resolve_user_mentions import resolve_user_mentions
 load_dotenv()
 from utils.global_kb import index_startup_files, query_global_kb
@@ -262,34 +264,49 @@ def handle_language_selection(ack, body, logger):
 
 @app.action("translate_button")
 def handle_translate_click(ack, body, client, logger):
-    # 1) Ack
+    # Ack immediately so Bolt doesn't complain about timeouts
     ack()
+    try:
+        # 1) Language choice
+        state_vals = body.get("state", {}).get("values", {}).get("translate_controls", {})
+        lang = (
+            state_vals.get("select_language", {})
+            .get("selected_option", {})
+            .get("value", "en")
+        )
 
-    # 2) Language choice
-    state_vals = body["state"]["values"]["translate_controls"]
-    lang = state_vals["select_language"]["selected_option"]["value"]
+        # 2) Reconstruct the original markdown text robustly
+        orig_blocks = body.get("message", {}).get("blocks", []) or []
+        sections = []
+        for blk in orig_blocks:
+            if blk.get("type") == "section":
+                text_obj = blk.get("text") or {}
+                if text_obj.get("type") == "mrkdwn" and "text" in text_obj:
+                    sections.append(text_obj["text"])
+        original_text = "\n".join(sections).strip()
 
-    # 3) Reconstruct original markdown text
-    orig_blocks = body["message"]["blocks"]
-    original_text = "\n".join(
-        blk["text"]["text"]
-        for blk in orig_blocks
-        if blk.get("type") == "section"
-           and isinstance(blk.get("text"), dict)
-           and blk["text"].get("type") == "mrkdwn"
-    )
+        # 3) Translate via LangChain Runnable (use invoke, not run)
+        # If you prefer your retry/trim logic, call: _invoke_chain(translation_chain, text=original_text, language=lang)
+        translated = (translation_chain.invoke({"text": original_text, "language": lang}) or "").strip()
+        translated = translated.replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
 
-    # 4) Translate via LLMChain
-    translated = translation_chain.run(text=original_text, language=lang).replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
+        # 4) Post the translation
+        send_message(
+            client,
+            body["channel"]["id"],
+            f":earth_asia: *Translation ({lang}):*\n{translated}",
+            thread_ts=body["message"]["ts"],
+            user_id=None,
+            export_pdf=False,
+        )
+    except Exception:
+        logger.exception("Translation failed")
+        client.chat_postMessage(
+            channel=body.get("channel", {}).get("id"),
+            thread_ts=body.get("message", {}).get("ts"),
+            text="❌ Sorry, translation failed."
+        )
 
-    send_message(
-        client,
-        body["channel"]["id"],
-        f":earth_asia: *Translation ({lang}):*\n{translated}",
-        body["message"]["ts"],
-        None,
-        False,  # NEW: allow PDF export of translations
-    )
 def load_stats():
     try:
         with open(STATS_FILE) as f:
@@ -663,26 +680,56 @@ def process_conversation(client: WebClient, event, text: str):
         save_stats()
 
         # Run analysis using the correct workspace client
+        # Run analysis using the correct workspace client
         try:
             target_client = get_client_for_team(target_team_id)
-            summary = analyze_entire_channel(target_client, channel_id, thread)\
-                .replace("[DD/MM/YYYY HH:MM UTC]", "")\
-                .replace("*@username*", "")\
-                .strip()
-            summary = git_md_to_slack_md(summary)
+
+            # NEW: Progress card for channel analysis
+            card = ProgressCard(
+                client=get_client_for_team(target_team_id),
+                channel=ch,
+                thread_ts=thread,
+                title=f"Analyzing #{raw} (channel)"
+            )
+            card.start("Fetching channel messages…")
+
+            def _run_with_progress(c: WebClient):
+                return analyze_entire_channel(
+                    c,
+                    channel_id,
+                    thread,
+                    # pass progress + time-bump callbacks just like thread analysis
+                    progress_card_cb=lambda pct, note: card.set(pct, note),
+                    time_bump=lambda: card.maybe_time_bumps(),
+                )
+
+            # If you want the same cross-workspace fallback pattern:
+            # summary_team_id, summary = ROUTER.try_call(target_team_id, _run_with_progress)
+            # Otherwise, just call directly:
+            summary = _run_with_progress(target_client)
+
+            summary = summary.replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
+            card.finish(ok=True, note="Completed.")
+
             send_message(
-                get_client_for_team(target_team_id),  # send from that workspace
-                ch if ch.startswith("D") else ch,     # DM channel OK; if public, original ch
+                get_client_for_team(target_team_id),
+                ch if ch.startswith("D") else ch,
                 summary,
                 thread_ts=thread,
                 user_id=uid,
-                export_pdf=True
+                export_pdf=True  # keep parity with thread export behavior if desired
             )
+
             _get_memory(thread).save_context(
                 {"human_input": f"ANALYZE #{channel_id} (team {target_team_id})"},
                 {"output": summary}
             )
+
         except Exception as e:
+            try:
+                card.finish(ok=False, note="Failed.")
+            except Exception:
+                pass
             send_message(
                 client, ch,
                 (
@@ -694,6 +741,7 @@ def process_conversation(client: WebClient, event, text: str):
                 ),
                 thread_ts=thread, user_id=uid
             )
+
         return
 
     m = re.search(r"https://[^/]+/archives/([^/]+)/p(\d+)", normalized, re.IGNORECASE)
@@ -705,30 +753,44 @@ def process_conversation(client: WebClient, event, text: str):
         else:
             USAGE_STATS["analyze_followups"] += 1
         save_stats()
+
         cid    = m.group(1)
         raw    = m.group(2)
         ts10   = raw[:10] + "." + raw[10:]
         cmd    = normalized.replace(m.group(0), "").strip().lower()
-        logging.debug(
-            "🔗 Analyzing thread %s in channel %s with command '%s'",ts10,cid,cmd)
 
         try:
+        # Use only the model card (Block Kit)
             export_pdf = False
+            card = ProgressCard(client, ch, thread, title="Thread analysis")
+            card.start("Fetching Slack messages…")
 
-            def _run(c: WebClient):
-                # choose default vs formatted based on your toggle
+            def _run_with_progress(c: WebClient):
                 if cid in FORMATTED_CHANNELS:
-                    return analyze_slack_thread(c, cid, ts10, instructions=cmd, default=False)
-                return analyze_slack_thread(c, cid, ts10, instructions=cmd, default=True)
+                    return analyze_slack_thread(
+                        c, cid, ts10,
+                        instructions=cmd,
+                        default= True,
+                        progress_card_cb=lambda pct, note: card.set(pct, note),
+                        time_bump=lambda: card.maybe_time_bumps(),
+                    )
+                return analyze_slack_thread(
+                        c, cid, ts10,
+                        instructions=cmd,
+                        default=False,
+                        progress_card_cb=lambda pct, note: card.set(pct, note),
+                        time_bump=lambda: card.maybe_time_bumps(),
+                    )
 
-            # Try primary team first, then the other workspace(s)
             detected_team = detect_real_team_from_event(None, event)
-            target_team_id, summary = ROUTER.try_call(detected_team, _run)
+            target_team_id, summary = ROUTER.try_call(detected_team, _run_with_progress)
 
             summary = summary.replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
+            card.finish(ok=True)
+
             send_message(
                 get_client_for_team(target_team_id),
-                ch,  # reply in the same DM/thread the user is in
+                ch,
                 summary,
                 thread_ts=thread,
                 user_id=uid,
@@ -739,6 +801,10 @@ def process_conversation(client: WebClient, event, text: str):
                 {"output": summary}
             )
         except Exception as e:
+            try:
+                card.finish(ok=False, note="Failed.")
+            except Exception:
+                pass
             send_message(
                 client, ch,
                 f"❌ Could not process thread in either workspace: {e}",
