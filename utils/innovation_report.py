@@ -160,7 +160,8 @@ def parse_innovation_sheet(df: pd.DataFrame, day_range: Optional[Tuple[int, int]
             # Use appropriate intro text based on whether range was specified
             if day_range:
                 message_parts.append(
-                    f"Last week's demos ({date_str}) included sessions on {areas_str}.\n"
+                    f"Last week's demos ({date_str}) included sessions on {areas_str}. "
+                    "Even more innovation is coming this week!\n"
                 )
             else:
                 message_parts.append(
@@ -213,13 +214,11 @@ def parse_innovation_sheet(df: pd.DataFrame, day_range: Optional[Tuple[int, int]
                 message_parts.append(f"Day {day_num} - {title} _(link not available)_")
         
         # Footer with standard links
-        message_parts.append("")  # Empty line
         message_parts.append(
             "Missed a day? Be sure and follow the "
             "<https://w3.ibm.com/w3publisher/core-software-organization/blogs|Leadership blogs> "
             "on the <https://w3.ibm.com/w3publisher/core-software-organization|Core Software Products> page."
         )
-        message_parts.append("")  # Empty line
         message_parts.append(
             ":demo3: Do you have an innovation demo you'd like to submit? "
             "Submit your info <https://ibm.box.com/s/re3s3o4r5ciwf74tv9nd028diqms0lh5|here>!"
