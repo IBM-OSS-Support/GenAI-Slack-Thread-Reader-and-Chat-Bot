@@ -32,5 +32,4 @@ def get_llm():
         async_client_kwargs={
             "timeout": httpx.Timeout(connect=60.0, read=600.0, write=600.0, pool=60.0)
         },
-        keep_alive="30m",
     )
