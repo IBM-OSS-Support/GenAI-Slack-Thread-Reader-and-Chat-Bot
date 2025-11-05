@@ -39,6 +39,7 @@ from chains.analyze_thread import translation_chain
 from utils.health import health_app, run_health_server
 from utils.innovation_report import parse_innovation_sheet
 logging.basicConfig(level=logging.DEBUG)
+from utils.usage_guide import get_usage_guide
 
 
 # Instantiate a single global vector store
@@ -654,6 +655,18 @@ def process_conversation(client: WebClient, event, text: str):
         return
 
     USAGE_STATS["total_calls"] += 1
+
+    # Usage guide command
+    normalized_text = resolve_user_mentions(client, cleaned).strip().lower()
+    if normalized_text in ("usage", "help"):
+        send_message(
+            client,
+            ch,
+            get_usage_guide(),
+            thread_ts=thread,
+            user_id=uid
+        )
+        return                                                                                 
 
     # Thread analysis
     m_ch = re.match(
