@@ -244,8 +244,13 @@ async def _fetch_history_paginated(
     progress_cb: Optional[Callable[[int, str], None]] = None,
     pct_start: int = 10,
     pct_end: int = 50,
+    oldest: Optional[float] = None,
+    latest: Optional[float] = None,
 ) -> List[dict]:
-    """Fetch all parent messages (exclude replies here)."""
+    """
+    Fetch all parent messages (exclude replies here) from a Slack channel,
+    optionally filtered by oldest/latest timestamps.
+    """
     parents, cursor, page_count, msg_count = [], None, 0, 0
     with timed("fetch_channel_history"):
         # We won’t know total pages up front; we’ll approximate using a soft cap
@@ -256,6 +261,8 @@ async def _fetch_history_paginated(
                 channel=channel_id,
                 limit=limit_per_page,
                 cursor=cursor,
+                oldest=str(oldest) if oldest else None,
+                latest=str(latest) if latest else None,
                 include_all_metadata=True
             )
             messages = resp.get("messages", []) or []
@@ -280,6 +287,7 @@ async def _fetch_history_paginated(
             if not cursor:
                 break
 
+    # sort messages by timestamp ascending
     parents.sort(key=lambda m: float(m["ts"]))
     # ensure we land on pct_end when history is done
     if progress_cb:
@@ -407,8 +415,12 @@ async def analyze_entire_channel_async(
     # optional progress/ticker callbacks (match thread progress API)
     progress_card_cb: Optional[Callable[[int, str], None]] = None,
     time_bump: Optional[Callable[[], None]] = None,
+    oldest: Optional[float] = None,
+    latest: Optional[float] = None,
 ) -> str:
-
+    """
+    Analyze all messages in a Slack channel within an optional timeframe.
+    """
     def step(p: int, msg: str):
         if progress_card_cb:
             try:
@@ -421,11 +433,10 @@ async def analyze_entire_channel_async(
 
     # 0) Start
     step(5, "Preparing channel analysis…")
-
     client = AsyncWebClient(token=token)
     name_cache = UserNameCache()
 
-    # 1) Fetch parents (with progress 10→50)
+    # 1) Fetch parent messages (with optional timeframe)
     parents = await _fetch_history_paginated(
         client,
         channel_id,
@@ -433,6 +444,8 @@ async def analyze_entire_channel_async(
         progress_cb=progress_card_cb,
         pct_start=10,
         pct_end=50,
+        oldest=oldest,
+        latest=latest,
     )
     if not parents:
         logger.warning(f"No messages found in <#{channel_id}>.")
@@ -489,16 +502,20 @@ async def analyze_entire_channel_async(
             k: reply_texts[i] for i, k in enumerate(reply_keys)
         } if reply_texts else {}
 
+        def _format_date_time_from_ts(ts: str) -> Tuple[str, str]:
+            from datetime import datetime
+            dt = datetime.fromtimestamp(float(ts))
+            return dt.strftime("%d %B %Y"), dt.strftime("%H:%M %Z")
+
         for p_idx, m in enumerate(parents):
             parent_ts = m["ts"]
             posted_date, posted_time = _format_date_time_from_ts(parent_ts)
-
             rec: Dict[str, object] = {
                 "thread_id": parent_ts,
                 "user_name": parent_names[p_idx],
                 "text": parent_texts[p_idx],
-                "posted_date": posted_date,   # 'DD Month 2025'
-                "posted_time": posted_time,   # 'HH:MM IST'
+                "posted_date": posted_date,
+                "posted_time": posted_time,
             }
 
             rs: List[Dict[str, str]] = []
@@ -612,7 +629,12 @@ def analyze_entire_channel(
     thread_ts: str,
     progress_card_cb: Optional[Callable[[int, str], None]] = None,
     time_bump: Optional[Callable[[], None]] = None,
+    oldest: Optional[float] = None,
+    latest: Optional[float] = None,
 ) -> str:
+    """
+    Sync wrapper for full-channel analysis with optional timeframe.
+    """
     token = getattr(client, "token", None)
     if not token:
         raise ValueError("WebClient missing token")
@@ -623,5 +645,7 @@ def analyze_entire_channel(
             thread_ts=thread_ts,
             progress_card_cb=progress_card_cb,
             time_bump=time_bump,
+            oldest=oldest,
+            latest=latest,
         )
     )

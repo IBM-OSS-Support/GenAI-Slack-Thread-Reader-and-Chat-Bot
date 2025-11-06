@@ -707,6 +707,9 @@ def process_conversation(client: WebClient, event, text: str):
             card.start("Fetching channel messages…")
 
             def _run_with_progress(c: WebClient):
+                now = time.time()
+                oldest = now - 5400   # last 30 mins
+                latest = now - 3600
                 return analyze_entire_channel(
                     c,
                     channel_id,
@@ -714,6 +717,8 @@ def process_conversation(client: WebClient, event, text: str):
                     # pass progress + time-bump callbacks just like thread analysis
                     progress_card_cb=lambda pct, note: card.set(pct, note),
                     time_bump=lambda: card.maybe_time_bumps(),
+                    oldest=oldest,
+                    latest=latest,
                 )
 
             # If you want the same cross-workspace fallback pattern:
