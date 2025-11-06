@@ -1,8 +1,8 @@
-# chains/preanalyze.py
 import json
 import re
-from typing import List, Optional
-from .llm_provider import get_llm
+from typing import List, Optional, Union
+
+from chains.llm_provider import get_llm
 
 # Optional: provide your headings so the LLM prefers canonical wording without inventing new fields.
 DEFAULT_HEADINGS: List[str] = [
@@ -23,6 +23,7 @@ DEFAULT_HEADINGS: List[str] = [
 
 PROMPT_TEMPLATE = """You are *QueryClean*, a guardrail that ONLY:
 - fixes typos/spelling,
+- Match with existing product/field names from the org dataset,
 - clarifies obvious grammar,
 - expands trivial shorthands (e.g., 'mgr' -> 'manager'),
 - keeps the *original meaning*,
@@ -43,12 +44,28 @@ Rules:
 User question:
 \"\"\"{question}\"\"\""""
 
-_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
+# Non-greedy JSON object capture (first {} block)
+_JSON_RE = re.compile(r"\{.*?\}", re.DOTALL)
+
+def _coerce_text(raw: Union[str, object]) -> str:
+    """
+    Convert model output to text. Supports AIMessage-like objects with `.content`.
+    Falls back to `str(raw)`.
+    """
+    if isinstance(raw, str):
+        return raw
+    # Common ChatMessage/AIMessage shapes
+    content = getattr(raw, "content", None)
+    if isinstance(content, str):
+        return content
+    return str(raw)
 
 def _extract_json(text: str) -> Optional[dict]:
     """
     Robustly extract the first JSON object found in text.
     """
+    if not isinstance(text, str):
+        return None
     m = _JSON_RE.search(text.strip())
     if not m:
         return None
@@ -78,14 +95,11 @@ def preanalyze_question(
     )
 
     llm = get_llm()
-    raw = ""
     try:
-        raw = llm.invoke(prompt)  # langchain_community.llms.Ollama returns a string
-        data = _extract_json(raw) or {}
+        raw = llm.invoke(prompt)  # may be a str or an AIMessage-like object
+        raw_text = _coerce_text(raw)
+        data = _extract_json(raw_text) or {}
         normalized = (data.get("normalized_query") or "").strip()
-        # Fallbacks if model didn't follow instructions
-        if not normalized:
-            return question
-        return normalized
+        return normalized or question
     except Exception:
         return question
