@@ -554,24 +554,15 @@ def get_bot_stats():
         f"👍 *{_vote_up_count}*   👎 *{_vote_down_count}*"
     )
 
-def open_date_time_dialog(
-    client,
-    trigger_id,
-    channel_id,
-    channel_name,
-    origin_channel,
-    thread_ts,
-    user_id,
-    team_id
-):
-    now = datetime.now(timezone.utc)
-
+# --------------------------
+# Open the first modal
+# --------------------------
+def open_date_time_dialog(client, trigger_id, channel_id, channel_name, origin_channel, thread_ts, user_id, team_id):
     view = {
         "type": "modal",
         "callback_id": "channel_analysis_date_picker",
         "title": {"type": "plain_text", "text": "Channel Analysis"},
-        "submit": {"type": "plain_text", "text": "Run"},
-        "close": {"type": "plain_text", "text": "Cancel"},
+        "close": {"type": "plain_text", "text": "Cancel"},  # no submit button
         "private_metadata": json.dumps({
             "channel_id": channel_id,
             "channel_name": channel_name,
@@ -581,10 +572,7 @@ def open_date_time_dialog(
             "team_id": team_id
         }),
         "blocks": [
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": "Select a timeframe:"}
-            },
+            {"type": "section", "text": {"type": "mrkdwn", "text": "Select a timeframe:"}},
             {
                 "type": "actions",
                 "block_id": "range_selector_block",
@@ -595,7 +583,7 @@ def open_date_time_dialog(
                     {"type": "button", "text": {"type": "plain_text", "text": "Last 1 month"}, "value": "1m", "action_id": "select_1m"},
                     {"type": "button", "text": {"type": "plain_text", "text": "Last 1 year"}, "value": "1y", "action_id": "select_1y"},
                     {"type": "button", "text": {"type": "plain_text", "text": "Entire channel"}, "value": "all", "action_id": "select_all"},
-                    {"type": "button", "text": {"type": "plain_text", "text": "Custom range"}, "value": "custom", "action_id": "select_custom"},
+                    {"type": "button", "text": {"type": "plain_text", "text": "Custom range"}, "value": "1w", "action_id": "select_custom"},
                 ]
             }
         ]
@@ -603,117 +591,44 @@ def open_date_time_dialog(
 
     client.views_open(trigger_id=trigger_id, view=view)
 
-@app.view("channel_analysis_date_picker")
-def handle_timeframe_submission(ack, body, client, logger):
-    ack()
-    try:
-        values = body["view"]["state"]["values"]
-        meta = json.loads(body["view"].get("private_metadata", "{}"))
-        selected = values["range_selector_block"]["range_selector"]["selected_option"]["value"]
+def get_time_range(value):
+    now = datetime.now(timezone.utc)
+    latest_ts = int(now.timestamp())
+    oldest_ts_map = {
+        "1h": int((now - timedelta(hours=1)).timestamp()),
+        "1d": int((now - timedelta(days=1)).timestamp()),
+        "1w": int((now - timedelta(weeks=1)).timestamp()),
+        "1m": int((now - timedelta(days=30)).timestamp()),
+        "1y": int((now - timedelta(days=365)).timestamp()),
+        "all": 0
+    }
+    return oldest_ts_map.get(value), latest_ts
 
-        user_id = body["user"]["id"]
-        channel_id = meta["channel_id"]
-        channel_name = meta["channel_name"]
-        origin_channel = meta["origin_channel"]
-        thread_ts = meta["thread_ts"]
-        team_id = meta["team_id"]
+# --------------------------
+# Handle preset ranges immediately
+# --------------------------
+PRESET_ACTIONS = ["select_1h", "select_1d", "select_1w", "select_1m", "select_1y", "select_all", "select_custom"]
 
-        selected = values["range_selector_block"]["range_selector"]["selected_option"]["value"]
-        now = datetime.now(timezone.utc)
-        latest_ts = int(now.timestamp())
+for action_id in PRESET_ACTIONS:
+    @app.action(action_id)
+    def handle_preset_buttons(ack, body, client, logger):
+        ack(response_action="clear")  # acknowledge immediately
 
-        # Compute preset ranges
-        if selected == "1h":
-            oldest_ts = int((now - timedelta(hours=1)).timestamp())
-        elif selected == "1d":
-            oldest_ts = int((now - timedelta(days=1)).timestamp())
-        elif selected == "1w":
-            oldest_ts = int((now - timedelta(weeks=1)).timestamp())
-        elif selected == "1m":
-            oldest_ts = int((now - timedelta(days=30)).timestamp())
-        elif selected == "1y":
-            oldest_ts = int((now - timedelta(days=365)).timestamp())
-        elif selected == "all":
-            oldest_ts = 0
+        view_id = body["view"]["id"]
+        view_hash = body["view"]["hash"]
+        action = body["actions"][0]
+        value = action["value"]
 
-        if selected != "custom":
-            # Run analysis immediately
-            oldest_str = datetime.fromtimestamp(oldest_ts).strftime("%b %-d, %Y (%-I:%M %p)")
-            latest_str = datetime.fromtimestamp(latest_ts).strftime("%b %-d, %Y (%-I:%M %p)")
+        # Safely read private metadata
+        meta = json.loads(body.get("view", {}).get("private_metadata", "{}"))
 
-            target_client = get_client_for_team(team_id)
-            card = ProgressCard(
-                client=target_client,
-                channel=origin_channel,
-                thread_ts=thread_ts,
-                title=f"Analyzing #{channel_name} [{oldest_str}  to  {latest_str}]",
-            )
-            card.start("Fetching channel messages…")
-
-            summary = analyze_entire_channel(
-                target_client,
-                channel_id,
-                thread_ts,
-                progress_card_cb=lambda pct, note: card.set(pct, note),
-                time_bump=lambda: card.maybe_time_bumps(),
-                oldest=oldest_ts,
-                latest=latest_ts,
-            )
-
-            summary = summary.replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
-            card.finish(ok=True, note="Completed.")
-
-            send_message(
-                target_client,
-                origin_channel,
-                summary,
-                thread_ts=thread_ts,
-                user_id=user_id,
-                export_pdf=True
-            )
-            _get_memory(thread_ts).save_context(
-                {"human_input": f"ANALYZE #{channel_id} (team {team_id})"},
-                {"output": summary}
-            )
-        else:
-            # Send ephemeral message with button to open custom date modal
-            client.chat_postEphemeral(
-                channel=meta["origin_channel"],  # channel stays the same
-                user=meta["user_id"],
-                text="You selected Custom Range. Click below to choose dates:",
-                thread_ts=meta.get("thread_ts"),  # add this to post in the same thread
-                blocks=[
-                    {
-                        "type": "actions",
-                        "block_id": "open_custom_range_block",
-                        "elements": [
-                            {
-                                "type": "button",
-                                "text": {"type": "plain_text", "text": "Select Custom Range"},
-                                "action_id": "open_custom_range",
-                                "value": json.dumps(meta)
-                            }
-                        ]
-                    }
-                ]
-            )
-
-    except Exception as e:
-        logger.exception(f"Error handling timeframe submission: {e}")
-
-@app.action("open_custom_range")
-def open_custom_range_modal(client, body, ack, logger):
-    ack()
-    try:
-        meta = json.loads(body["actions"][0]["value"])
-        now = datetime.now(timezone.utc)
-        latest_ts = int(now.timestamp())
-        oldest_ts = int((now - timedelta(days=1)).timestamp())
+        # Compute timestamps for the selected preset
+        oldest_ts, latest_ts = get_time_range(value)
 
         view = {
             "type": "modal",
-            "callback_id": "channel_analysis_custom_range",
-            "title": {"type": "plain_text", "text": "Custom Date Range"},
+            "callback_id": "custom_date_picker_modal",
+            "title": {"type": "plain_text", "text": "Select Custom Date Range"},
             "submit": {"type": "plain_text", "text": "Run"},
             "close": {"type": "plain_text", "text": "Cancel"},
             "private_metadata": json.dumps(meta),
@@ -733,69 +648,55 @@ def open_custom_range_modal(client, body, ack, logger):
             ]
         }
 
-        client.views_open(trigger_id=body["trigger_id"], view=view)
+        client.views_update(
+            view_id=view_id,
+            hash=view_hash,
+            view=view
+        )
 
-    except Exception as e:
-        logger.exception(f"Error opening custom range modal: {e}")
+# --------------------------
+# Handle date submission
+# --------------------------
+@app.view("custom_date_picker_modal")
+def handle_custom_date_submission(ack, body, client, logger):
+    ack()  # always ack first
 
-@app.view("channel_analysis_custom_range")
-def handle_custom_range_submission(ack, body, client, logger):
-    ack()
     try:
         values = body["view"]["state"]["values"]
         meta = json.loads(body["view"].get("private_metadata", "{}"))
-        #selected = values["range_selector_block"]["range_selector"]["selected_option"]["value"]
 
-        user_id = body["user"]["id"]
-        channel_id = meta["channel_id"]
-        channel_name = meta["channel_name"]
-        origin_channel = meta["origin_channel"]
-        thread_ts = meta["thread_ts"]
-        team_id = meta["team_id"]
-        values = body["view"]["state"]["values"]
-        meta = json.loads(body["view"].get("private_metadata", "{}"))
-        oldest_ts = int(values["oldest_block"]["oldest"]["selected_date_time"])
-        latest_ts = int(values["latest_block"]["latest"]["selected_date_time"])
+        oldest_ts = values["oldest_block"]["oldest"]["selected_date_time"]
+        latest_ts = values["latest_block"]["latest"]["selected_date_time"]
+
         oldest_str = datetime.fromtimestamp(oldest_ts).strftime("%b %-d, %Y (%-I:%M %p)")
         latest_str = datetime.fromtimestamp(latest_ts).strftime("%b %-d, %Y (%-I:%M %p)")
 
-        target_client = get_client_for_team(team_id)
+        target_client = get_client_for_team(meta["team_id"])
         card = ProgressCard(
             client=target_client,
-            channel=origin_channel,
-            thread_ts=thread_ts,
-            title=f"Analyzing #{channel_name} [{oldest_str}  to  {latest_str}]",
+            channel=meta["origin_channel"],
+            thread_ts=meta["thread_ts"],
+            title=f"Analyzing #{meta['channel_name']} [{oldest_str} to {latest_str}]",
         )
         card.start("Fetching channel messages…")
-
         summary = analyze_entire_channel(
             target_client,
-            channel_id,
-            thread_ts,
-            progress_card_cb=lambda pct, note: card.set(pct, note),
-            time_bump=lambda: card.maybe_time_bumps(),
+            meta["channel_id"],
+            meta["thread_ts"],
             oldest=oldest_ts,
             latest=latest_ts,
+            progress_card_cb=lambda pct, note: card.set(pct, note)
         )
-
-        summary = summary.replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
         card.finish(ok=True, note="Completed.")
+        send_message(target_client, meta["origin_channel"], summary, thread_ts=meta["thread_ts"], user_id=meta["user_id"])
 
-        send_message(
-            target_client,
-            origin_channel,
-            summary,
-            thread_ts=thread_ts,
-            user_id=user_id,
-            export_pdf=True
-        )
-        _get_memory(thread_ts).save_context(
-            {"human_input": f"ANALYZE #{channel_id} (team {team_id})"},
-            {"output": summary}
-        )
     except Exception as e:
-        logger.exception(f"Error handling custom range submission: {e}")
-
+        logger.exception(f"Error handling custom date submission: {e}")
+        client.chat_postMessage(
+            channel=meta.get("origin_channel", meta.get("user_id")),
+            text=f"❌ Failed to analyze channel: `{e}`",
+            thread_ts=meta.get("thread_ts")
+        )
 
 def process_conversation(client: WebClient, event, text: str):
     ch      = event["channel"]
