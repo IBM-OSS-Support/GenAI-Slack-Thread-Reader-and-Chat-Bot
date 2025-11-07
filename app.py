@@ -40,6 +40,7 @@ from utils.health import health_app, run_health_server
 from utils.innovation_report import parse_innovation_sheet
 logging.basicConfig(level=logging.DEBUG)
 from utils.usage_guide import get_usage_guide
+from slack_sdk.models.blocks import SectionBlock, ActionsBlock, ButtonElement
 
 
 # Instantiate a single global vector store
@@ -552,6 +553,125 @@ def get_bot_stats():
         f"👍 *{_vote_up_count}*   👎 *{_vote_down_count}*"
     )
 
+def open_date_time_dialog(client, trigger_id, channel_id, channel_name, origin_channel, thread_ts, user_id, team_id):
+    view = {
+        "type": "modal",
+        "callback_id": "channel_analysis_date_picker",
+        "title": {"type": "plain_text", "text": "Channel Analysis"},
+        "submit": {"type": "plain_text", "text": "Run"},
+        "close": {"type": "plain_text", "text": "Cancel"},
+        "private_metadata": json.dumps({
+            "channel_id": channel_id,
+            "channel_name": channel_name,
+            "origin_channel": origin_channel,
+            "thread_ts": thread_ts,
+            "user_id": user_id,
+            "team_id": team_id
+        }),
+        "blocks": [
+            {
+                "type": "input",
+                "block_id": "oldest_block",
+                "label": {"type": "plain_text", "text": "Start Date & Time (UTC)"},
+                "element": {
+                    "type": "datetimepicker",
+                    "action_id": "oldest"
+                }
+            },
+            {
+                "type": "input",
+                "block_id": "latest_block",
+                "label": {"type": "plain_text", "text": "End Date & Time (UTC)"},
+                "element": {
+                    "type": "datetimepicker",
+                    "action_id": "latest"
+                }
+            }
+        ]
+    }
+
+    client.views_open(trigger_id=trigger_id, view=view)
+
+@app.view("channel_analysis_date_picker")
+def handle_channel_analysis_submission(ack, body, client, logger):
+    """
+    Handles the submission of the custom channel analysis modal in Slack Bolt.
+    """
+    ack()  # always acknowledge immediately
+
+    try:
+        user_id = body["user"]["id"]
+        team_id = body["team"]["id"]
+        view = body["view"]
+        values = view["state"]["values"]
+
+        # Load private metadata (we encoded this when opening the modal)
+        meta = json.loads(view.get("private_metadata", "{}"))
+
+        channel_id = meta.get("channel_id")
+        channel_name = meta.get("channel_name", "unknown")
+        origin_channel = meta.get("origin_channel", user_id)
+        thread_ts = meta.get("thread_ts")
+        team_id = meta.get("team_id", team_id)
+
+        oldest_ts = int(values["oldest_block"]["oldest"]["selected_date_time"])
+        latest_ts = int(values["latest_block"]["latest"]["selected_date_time"])
+        from datetime import datetime
+        # Convert timestamps to local time strings in desired format
+        oldest_str = datetime.fromtimestamp(oldest_ts).strftime("%b %-d, %Y (%-I:%M %p)")
+        latest_str = datetime.fromtimestamp(latest_ts).strftime("%b %-d, %Y (%-I:%M %p)")
+
+        target_client = get_client_for_team(team_id)
+        card = ProgressCard(
+            client=target_client,
+            channel=origin_channel,
+            thread_ts=thread_ts,
+            title=f"Analyzing #{channel_name} [{oldest_str}  to  {latest_str}]",
+        )
+        card.start("Fetching channel messages…")
+
+        summary = analyze_entire_channel(
+            target_client,
+            channel_id,
+            thread_ts,
+            progress_card_cb=lambda pct, note: card.set(pct, note),
+            time_bump=lambda: card.maybe_time_bumps(),
+            oldest=oldest_ts,
+            latest=latest_ts,
+        )
+
+        summary = summary.replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
+        card.finish(ok=True, note="Completed.")
+
+        send_message(
+            target_client,
+            origin_channel,
+            summary,
+            thread_ts=thread_ts,
+            user_id=user_id,
+            export_pdf=True
+        )
+
+        _get_memory(thread_ts).save_context(
+            {"human_input": f"ANALYZE #{channel_id} (team {team_id})"},
+            {"output": summary}
+        )
+
+    except Exception as e:
+        logger.exception(f"❌ Error in channel analysis submission: {e}")
+        try:
+            card.finish(ok=False, note="Failed.")
+        except Exception:
+            pass
+
+        client.chat_postMessage(
+            channel=origin_channel,
+            text=f"❌ Failed to analyze channel `{channel_name}`: `{e}`",
+            thread_ts=thread_ts
+        )
+
+
+
 def process_conversation(client: WebClient, event, text: str):
     ch      = event["channel"]
     ts      = event["ts"]
@@ -693,55 +813,32 @@ def process_conversation(client: WebClient, event, text: str):
         save_stats()
 
         # Run analysis using the correct workspace client
-        # Run analysis using the correct workspace client
         try:
-            target_client = get_client_for_team(target_team_id)
-
-            # NEW: Progress card for channel analysis
-            card = ProgressCard(
-                client=get_client_for_team(target_team_id),
-                channel=ch,
-                thread_ts=thread,
-                title=f"Analyzing #{raw} (channel)"
+            client.chat_postMessage(
+            channel=ch,
+            text=f"Click below to analyze #{raw} with custom dates:",
+            blocks=[
+                SectionBlock(text=f"Analyze #{raw}").to_dict(),
+                ActionsBlock(
+                    elements=[
+                        ButtonElement(
+                            text="Select Dates & Analyze",
+                            action_id="analyze_channel_button",
+                            value=json.dumps({
+                                "channel_id": channel_id,
+                                "channel_name": raw,
+                                "origin_channel": ch,
+                                "thread_ts": thread,
+                                "team_id": target_team_id,
+                                "user_id": uid
+                            })
+                        ).to_dict()
+                    ]
+                ).to_dict()
+            ],
+            thread_ts=thread
             )
-            card.start("Fetching channel messages…")
-
-            def _run_with_progress(c: WebClient):
-                now = time.time()
-                oldest = now - 5400   # last 30 mins
-                latest = now - 3600
-                return analyze_entire_channel(
-                    c,
-                    channel_id,
-                    thread,
-                    # pass progress + time-bump callbacks just like thread analysis
-                    progress_card_cb=lambda pct, note: card.set(pct, note),
-                    time_bump=lambda: card.maybe_time_bumps(),
-                    oldest=oldest,
-                    latest=latest,
-                )
-
-            # If you want the same cross-workspace fallback pattern:
-            # summary_team_id, summary = ROUTER.try_call(target_team_id, _run_with_progress)
-            # Otherwise, just call directly:
-            summary = _run_with_progress(target_client)
-
-            summary = summary.replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
-            card.finish(ok=True, note="Completed.")
-
-            send_message(
-                get_client_for_team(target_team_id),
-                ch if ch.startswith("D") else ch,
-                summary,
-                thread_ts=thread,
-                user_id=uid,
-                export_pdf=True  # keep parity with thread export behavior if desired
-            )
-
-            _get_memory(thread).save_context(
-                {"human_input": f"ANALYZE #{channel_id} (team {target_team_id})"},
-                {"output": summary}
-            )
+            return
 
         except Exception as e:
             try:
@@ -1151,6 +1248,27 @@ def handle_conversation_select(ack, body, client, logger):
     channel=user_id,
     text=f":x: I wasn’t able to add me to <#{channel_id}>: `{error_code}`"
 )
+
+@app.action("analyze_channel_button")
+def handle_analyze_channel_button(ack, body, client, logger):
+    ack()  # Always acknowledge
+
+    # `trigger_id` is available here because this is an interactive action
+    trigger_id = body["trigger_id"]
+    meta = json.loads(body["actions"][0]["value"])
+
+    open_date_time_dialog(
+        client=client,
+        trigger_id=trigger_id,
+        channel_id=meta["channel_id"],
+        channel_name=meta["channel_name"],
+        origin_channel=meta["origin_channel"],
+        thread_ts=meta["thread_ts"],
+        user_id=meta["user_id"],
+        team_id=meta["team_id"]
+    )
+
+
 @app.action("analyze_button")
 def handle_analyze_button(ack, body, client, logger):
     # 1️⃣ Acknowledge right away so Slack doesn’t complain
@@ -1412,8 +1530,8 @@ def handle_analyze_thread_button(ack, body, client, logger):
     do_analysis(fake, client)
 
 # Analyze Channel button
-@app.action("analyze_channel_button")
-def handle_analyze_channel_button(ack, body, client, logger):
+@app.action("analyze_channel_button1")
+def handle_analyze_channel_button1(ack, body, client, logger):
     ack()
     user = body["user"]["id"]
     cid = body["view"]["state"]["values"]["channel_input_block"]["analyze_channel_select"]["selected_conversation"]
