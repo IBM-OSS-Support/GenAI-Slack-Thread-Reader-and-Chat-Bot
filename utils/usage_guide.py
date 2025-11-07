@@ -19,7 +19,7 @@ def get_usage_guide():
         "• _In my direct chat or channel thread_, click ➕ → “*Upload from computer*”\n"
         "• Select your file (PDF, TXT, CSV, or XLSX)\n"
         "• After upload, reply in the same thread: `What are the key points?`\n"
-        "• I’ll index it and answer based on content — no need to mention me in DMs!\n\n"
+        "• I’ll index it and answer based on content — no need to mention me in Direct Chat!\n\n"
 
         "*4️⃣ Ask Anything (General Q&A)*\n"
         "Ask me anything — I’ll respond using my training and latest data:\n"
@@ -27,7 +27,7 @@ def get_usage_guide():
         "• In channels: Always start with `@Ask-Support`\n"
         "→ Examples:\n"
         "  - `@Ask-Support What’s the status of Watsonx support?`\n"
-        "  - `Explain how escalation workflows work.` (in DM)\n\n"
+        "  - `Explain how escalation workflows work.` (in Direct Chat)\n\n"
 
         "*📝 Multi-Language Support:* Click on Dropdown seen below the Summary/Explanation → Select the language to translate. \n"
     )
