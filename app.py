@@ -41,6 +41,7 @@ from utils.innovation_report import parse_innovation_sheet
 logging.basicConfig(level=logging.DEBUG)
 from utils.usage_guide import get_usage_guide
 from slack_sdk.models.blocks import SectionBlock, ActionsBlock, ButtonElement
+from datetime import datetime, timezone, timedelta
 
 
 # Instantiate a single global vector store
@@ -553,7 +554,18 @@ def get_bot_stats():
         f"👍 *{_vote_up_count}*   👎 *{_vote_down_count}*"
     )
 
-def open_date_time_dialog(client, trigger_id, channel_id, channel_name, origin_channel, thread_ts, user_id, team_id):
+def open_date_time_dialog(
+    client,
+    trigger_id,
+    channel_id,
+    channel_name,
+    origin_channel,
+    thread_ts,
+    user_id,
+    team_id
+):
+    now = datetime.now(timezone.utc)
+
     view = {
         "type": "modal",
         "callback_id": "channel_analysis_date_picker",
@@ -570,22 +582,21 @@ def open_date_time_dialog(client, trigger_id, channel_id, channel_name, origin_c
         }),
         "blocks": [
             {
-                "type": "input",
-                "block_id": "oldest_block",
-                "label": {"type": "plain_text", "text": "Start Date & Time (UTC)"},
-                "element": {
-                    "type": "datetimepicker",
-                    "action_id": "oldest"
-                }
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "Select a timeframe:"}
             },
             {
-                "type": "input",
-                "block_id": "latest_block",
-                "label": {"type": "plain_text", "text": "End Date & Time (UTC)"},
-                "element": {
-                    "type": "datetimepicker",
-                    "action_id": "latest"
-                }
+                "type": "actions",
+                "block_id": "range_selector_block",
+                "elements": [
+                    {"type": "button", "text": {"type": "plain_text", "text": "Last 1 hour"}, "value": "1h", "action_id": "select_1h"},
+                    {"type": "button", "text": {"type": "plain_text", "text": "Last 1 day"}, "value": "1d", "action_id": "select_1d"},
+                    {"type": "button", "text": {"type": "plain_text", "text": "Last 1 week"}, "value": "1w", "action_id": "select_1w"},
+                    {"type": "button", "text": {"type": "plain_text", "text": "Last 1 month"}, "value": "1m", "action_id": "select_1m"},
+                    {"type": "button", "text": {"type": "plain_text", "text": "Last 1 year"}, "value": "1y", "action_id": "select_1y"},
+                    {"type": "button", "text": {"type": "plain_text", "text": "Entire channel"}, "value": "all", "action_id": "select_all"},
+                    {"type": "button", "text": {"type": "plain_text", "text": "Custom range"}, "value": "custom", "action_id": "select_custom"},
+                ]
             }
         ]
     }
@@ -593,31 +604,158 @@ def open_date_time_dialog(client, trigger_id, channel_id, channel_name, origin_c
     client.views_open(trigger_id=trigger_id, view=view)
 
 @app.view("channel_analysis_date_picker")
-def handle_channel_analysis_submission(ack, body, client, logger):
-    """
-    Handles the submission of the custom channel analysis modal in Slack Bolt.
-    """
-    ack()  # always acknowledge immediately
-
+def handle_timeframe_submission(ack, body, client, logger):
+    ack()
     try:
+        values = body["view"]["state"]["values"]
+        meta = json.loads(body["view"].get("private_metadata", "{}"))
+        selected = values["range_selector_block"]["range_selector"]["selected_option"]["value"]
+
         user_id = body["user"]["id"]
-        team_id = body["team"]["id"]
-        view = body["view"]
-        values = view["state"]["values"]
+        channel_id = meta["channel_id"]
+        channel_name = meta["channel_name"]
+        origin_channel = meta["origin_channel"]
+        thread_ts = meta["thread_ts"]
+        team_id = meta["team_id"]
 
-        # Load private metadata (we encoded this when opening the modal)
-        meta = json.loads(view.get("private_metadata", "{}"))
+        selected = values["range_selector_block"]["range_selector"]["selected_option"]["value"]
+        now = datetime.now(timezone.utc)
+        latest_ts = int(now.timestamp())
 
-        channel_id = meta.get("channel_id")
-        channel_name = meta.get("channel_name", "unknown")
-        origin_channel = meta.get("origin_channel", user_id)
-        thread_ts = meta.get("thread_ts")
-        team_id = meta.get("team_id", team_id)
+        # Compute preset ranges
+        if selected == "1h":
+            oldest_ts = int((now - timedelta(hours=1)).timestamp())
+        elif selected == "1d":
+            oldest_ts = int((now - timedelta(days=1)).timestamp())
+        elif selected == "1w":
+            oldest_ts = int((now - timedelta(weeks=1)).timestamp())
+        elif selected == "1m":
+            oldest_ts = int((now - timedelta(days=30)).timestamp())
+        elif selected == "1y":
+            oldest_ts = int((now - timedelta(days=365)).timestamp())
+        elif selected == "all":
+            oldest_ts = 0
 
+        if selected != "custom":
+            # Run analysis immediately
+            oldest_str = datetime.fromtimestamp(oldest_ts).strftime("%b %-d, %Y (%-I:%M %p)")
+            latest_str = datetime.fromtimestamp(latest_ts).strftime("%b %-d, %Y (%-I:%M %p)")
+
+            target_client = get_client_for_team(team_id)
+            card = ProgressCard(
+                client=target_client,
+                channel=origin_channel,
+                thread_ts=thread_ts,
+                title=f"Analyzing #{channel_name} [{oldest_str}  to  {latest_str}]",
+            )
+            card.start("Fetching channel messages…")
+
+            summary = analyze_entire_channel(
+                target_client,
+                channel_id,
+                thread_ts,
+                progress_card_cb=lambda pct, note: card.set(pct, note),
+                time_bump=lambda: card.maybe_time_bumps(),
+                oldest=oldest_ts,
+                latest=latest_ts,
+            )
+
+            summary = summary.replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
+            card.finish(ok=True, note="Completed.")
+
+            send_message(
+                target_client,
+                origin_channel,
+                summary,
+                thread_ts=thread_ts,
+                user_id=user_id,
+                export_pdf=True
+            )
+            _get_memory(thread_ts).save_context(
+                {"human_input": f"ANALYZE #{channel_id} (team {team_id})"},
+                {"output": summary}
+            )
+        else:
+            # Send ephemeral message with button to open custom date modal
+            client.chat_postEphemeral(
+                channel=meta["origin_channel"],  # channel stays the same
+                user=meta["user_id"],
+                text="You selected Custom Range. Click below to choose dates:",
+                thread_ts=meta.get("thread_ts"),  # add this to post in the same thread
+                blocks=[
+                    {
+                        "type": "actions",
+                        "block_id": "open_custom_range_block",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {"type": "plain_text", "text": "Select Custom Range"},
+                                "action_id": "open_custom_range",
+                                "value": json.dumps(meta)
+                            }
+                        ]
+                    }
+                ]
+            )
+
+    except Exception as e:
+        logger.exception(f"Error handling timeframe submission: {e}")
+
+@app.action("open_custom_range")
+def open_custom_range_modal(client, body, ack, logger):
+    ack()
+    try:
+        meta = json.loads(body["actions"][0]["value"])
+        now = datetime.now(timezone.utc)
+        latest_ts = int(now.timestamp())
+        oldest_ts = int((now - timedelta(days=1)).timestamp())
+
+        view = {
+            "type": "modal",
+            "callback_id": "channel_analysis_custom_range",
+            "title": {"type": "plain_text", "text": "Custom Date Range"},
+            "submit": {"type": "plain_text", "text": "Run"},
+            "close": {"type": "plain_text", "text": "Cancel"},
+            "private_metadata": json.dumps(meta),
+            "blocks": [
+                {
+                    "type": "input",
+                    "block_id": "oldest_block",
+                    "label": {"type": "plain_text", "text": "Start Date & Time (UTC)"},
+                    "element": {"type": "datetimepicker", "action_id": "oldest", "initial_date_time": oldest_ts}
+                },
+                {
+                    "type": "input",
+                    "block_id": "latest_block",
+                    "label": {"type": "plain_text", "text": "End Date & Time (UTC)"},
+                    "element": {"type": "datetimepicker", "action_id": "latest", "initial_date_time": latest_ts}
+                }
+            ]
+        }
+
+        client.views_open(trigger_id=body["trigger_id"], view=view)
+
+    except Exception as e:
+        logger.exception(f"Error opening custom range modal: {e}")
+
+@app.view("channel_analysis_custom_range")
+def handle_custom_range_submission(ack, body, client, logger):
+    ack()
+    try:
+        values = body["view"]["state"]["values"]
+        meta = json.loads(body["view"].get("private_metadata", "{}"))
+        #selected = values["range_selector_block"]["range_selector"]["selected_option"]["value"]
+
+        user_id = body["user"]["id"]
+        channel_id = meta["channel_id"]
+        channel_name = meta["channel_name"]
+        origin_channel = meta["origin_channel"]
+        thread_ts = meta["thread_ts"]
+        team_id = meta["team_id"]
+        values = body["view"]["state"]["values"]
+        meta = json.loads(body["view"].get("private_metadata", "{}"))
         oldest_ts = int(values["oldest_block"]["oldest"]["selected_date_time"])
         latest_ts = int(values["latest_block"]["latest"]["selected_date_time"])
-        from datetime import datetime
-        # Convert timestamps to local time strings in desired format
         oldest_str = datetime.fromtimestamp(oldest_ts).strftime("%b %-d, %Y (%-I:%M %p)")
         latest_str = datetime.fromtimestamp(latest_ts).strftime("%b %-d, %Y (%-I:%M %p)")
 
@@ -651,25 +789,12 @@ def handle_channel_analysis_submission(ack, body, client, logger):
             user_id=user_id,
             export_pdf=True
         )
-
         _get_memory(thread_ts).save_context(
             {"human_input": f"ANALYZE #{channel_id} (team {team_id})"},
             {"output": summary}
         )
-
     except Exception as e:
-        logger.exception(f"❌ Error in channel analysis submission: {e}")
-        try:
-            card.finish(ok=False, note="Failed.")
-        except Exception:
-            pass
-
-        client.chat_postMessage(
-            channel=origin_channel,
-            text=f"❌ Failed to analyze channel `{channel_name}`: `{e}`",
-            thread_ts=thread_ts
-        )
-
+        logger.exception(f"Error handling custom range submission: {e}")
 
 
 def process_conversation(client: WebClient, event, text: str):
