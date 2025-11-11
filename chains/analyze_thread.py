@@ -27,6 +27,7 @@ from utils.resolve_user_mentions import resolve_user_mentions
 from utils.slack_tools import fetch_slack_thread, get_user_name
 
 logger = logging.getLogger(__name__)
+THREAD_ANALYSIS_BLOBS: dict[str, str] = {}
 
 # -----------------------------------------------------------------------------
 # Prompts (content unchanged)
@@ -264,6 +265,7 @@ def analyze_slack_thread(
             out = _invoke_chain(summary_chain, messages=blob)
         else:
             out = _invoke_chain(custom_chain, messages=blob, instructions=instructions or "")
+        THREAD_ANALYSIS_BLOBS[thread_ts] = blob
 
         if progress_card_cb:
             progress_card_cb(100, "Completed.")
