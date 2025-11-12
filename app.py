@@ -40,9 +40,6 @@ from utils.health import health_app, run_health_server
 from utils.innovation_report import parse_innovation_sheet
 logging.basicConfig(level=logging.DEBUG)
 from utils.usage_guide import get_usage_guide
-from chains.analyze_thread import analyze_slack_thread, custom_chain, THREAD_ANALYSIS_BLOBS  # NEW
-
-
 
 
 # Instantiate a single global vector store
@@ -60,6 +57,10 @@ TEAM_BOT_TOKENS = {
 formatted = os.getenv("FORMATTED_CHANNELS", "")
 FORMATTED_CHANNELS = {ch.strip() for ch in formatted.split(",") if ch.strip()}
 logging.info(f"Formatted channels: {FORMATTED_CHANNELS}")
+
+# Prevent the spinner → warning when user picks a channel from home-tab dropdown
+USER_SELECTED_CHANNELS: dict[str, str] = {}  # optional in-memory cache (user_id -> channel_id)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Multi‑workspace router with automatic fallback
 # ─────────────────────────────────────────────────────────────────────────────
@@ -568,7 +569,6 @@ def process_conversation(client: WebClient, event, text: str):
         _memories.pop(thread, None)
         _last_activity.pop(thread, None)
         _active_sessions.pop(thread, None)
-        THREAD_ANALYSIS_BLOBS.pop(thread, None)  # NEW: drop saved blob on expiry
         send_message(
             client, ch,
             f"⚠️ Conversation expired ({mins}m). Start a new one.",
@@ -634,20 +634,6 @@ def process_conversation(client: WebClient, event, text: str):
         return
 
     logging.debug("🔔 Processing: %s", resolve_user_mentions(client, cleaned).strip())
-    if is_followup and (thread in ANALYSIS_THREADS) and THREAD_ANALYSIS_BLOBS.get(thread):
-        try:
-            focused = custom_chain.invoke({
-                "messages": THREAD_ANALYSIS_BLOBS[thread],
-                "instructions": normalized
-            }).strip()
-        except Exception:
-            # graceful fallback
-            focused = process_message_mcp(normalized, thread)
-
-        USAGE_STATS["analyze_followups"] += 1
-        save_stats()
-        send_message(client, ch, focused, thread_ts=thread, user_id=uid)
-        return
 
     
     # Help command
@@ -843,14 +829,6 @@ def process_conversation(client: WebClient, event, text: str):
                 thread_ts=thread,
                 user_id=uid,
                 export_pdf=(cid in FORMATTED_CHANNELS)
-            )
-            send_message(
-                get_client_for_team(target_team_id),
-                ch,
-                "💬 Want a deeper dive? Reply in *this thread* with your question "
-                "(e.g., *explain the timeline*, *why did we escalate*, *expand Business Impact*).",
-                thread_ts=thread,
-                user_id=uid
             )
             _get_memory(thread).save_context(
                 {"human_input": f"{cmd.upper() or 'ANALYZE'} {ts10} (team {target_team_id})"},
@@ -1693,6 +1671,35 @@ def handle_analyze_button(ack, body, client, logger):
 #         logger.error(e)
 #         client.chat_postMessage(channel=user_id, text=f":x: Couldn’t add me: `{e.response['error']}`")
 
+# Analyze Channel Select Menu
+@app.action("analyze_channel_select")
+def handle_home_analyze_select(ack, body, logger):
+    """
+    Minimal handler for the Home tab 'Analyze Channel' conversations_select.
+    IMPORTANT: ack() must be called immediately to avoid Slack showing the spinner/warning.
+    """
+    try:
+        # ACK first, always (very fast)
+        ack()
+
+        # Safely extract what user picked (do work only after ack)
+        user_id = body.get("user", {}).get("id")
+        actions = body.get("actions", []) or []
+        selected = None
+        if actions:
+            selected = actions[0].get("selected_conversation")  # channel id like C012345
+        logger.info("Home dropdown selection by %s -> %s", user_id, selected)
+
+        # Optional: cache selection so analyze_button can read it (safe, in-memory)
+        if user_id and selected:
+            USER_SELECTED_CHANNELS[user_id] = selected
+
+        # DON'T do any heavy work here, and DON'T call views_publish() synchronously.
+        # If you need to update the Home view, schedule that after ack in background.
+    except Exception as e:
+        # ack() already called; exceptions here won't trigger the warning icon.
+        logger.exception("Error in analyze_channel_select handler: %s", e)
+
 # Analyze Thread button
 @app.action("analyze_thread_button")
 def handle_analyze_thread_button(ack, body, client, logger):
@@ -1731,3 +1738,4 @@ if __name__=="__main__":
         logging.exception(f"Startup indexing failed: {e}")
     threading.Thread(target=run_health_server, daemon=True).start()
     SocketModeHandler(app,SLACK_APP_TOKEN).start()
+# ────────────────────────────────────────────────────────────────

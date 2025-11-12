@@ -1,22 +1,12 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-
-import threading
-import time
-
-import logging
-
-from slack_sdk import WebClient
-
-
-logging.basicConfig(level=logging.DEBUG)
-from typing import Literal, Callable
-
 import time
 import logging
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
+
+logging.basicConfig(level=logging.DEBUG)
 
 
 class ProgressCard:
@@ -24,7 +14,7 @@ class ProgressCard:
 
     def __init__(self, client: WebClient, channel: str, thread_ts: str, title="Analyzing thread"):
         self.client = client
-        self.channel = channel
+        self.channel = channel  # may be a DM channel id "D..." or a user id "U..."
         self.thread_ts = thread_ts
         self.title = title
         self.ts = None
@@ -40,7 +30,6 @@ class ProgressCard:
             self.team_id = None
             self.team_name = None
 
-    # ────────────────────────────────────────────────────────────────
     @staticmethod
     def _bar_line(pct: int, width: int = 24) -> str:
         pct = max(0, min(100, int(pct)))
@@ -56,10 +45,28 @@ class ProgressCard:
             {"type": "divider"},
         ]
 
-    # ────────────────────────────────────────────────────────────────
+    def _resolve_dm_if_needed(self):
+        """
+        If `self.channel` looks like a user id (starts with 'U'), open a DM with that user
+        using the *same client* and replace self.channel with the DM channel id.
+        """
+        try:
+            if isinstance(self.channel, str) and self.channel.startswith("U"):
+                resp = self.client.conversations_open(users=[self.channel])
+                dm = resp.get("channel", {}).get("id")
+                if dm:
+                    logging.debug("[ProgressCard] resolved user %s -> dm %s", self.channel, dm)
+                    self.channel = dm
+        except SlackApiError as e:
+            logging.warning("[ProgressCard] conversations_open failed for user %s: %s", self.channel, e.response.get("error"))
+
     def start(self, subtitle="Starting…"):
         """Post initial progress message."""
         self._pct = 0
+
+        # If caller passed a user id, open a DM first (important for cross-workspace cases)
+        self._resolve_dm_if_needed()
+
         try:
             resp = self.client.chat_postMessage(
                 channel=self.channel,
@@ -79,12 +86,16 @@ class ProgressCard:
             )
             self.ts = None
 
-    # ────────────────────────────────────────────────────────────────
     def set(self, pct: int, subtitle: str):
         """Update progress bar percentage and subtitle."""
         self._pct = max(0, min(100, int(pct)))
+
+        # If the original `start()` didn't resolve a DM because it had a user id,
+        # make sure to resolve now (covers callers who passed a raw user id).
+        self._resolve_dm_if_needed()
+
         if not self.ts:
-            # nothing to update — post a new one
+            # nothing to update — create a new message (start() will set self.ts)
             logging.warning("[ProgressCard] No ts; creating new progress message.")
             return self.start(subtitle)
 
@@ -102,7 +113,7 @@ class ProgressCard:
                 self.team_id, self.channel, self.ts, err,
             )
             if err == "message_not_found":
-                # The message was removed or token can’t see it — re-post
+                # The message was removed or token can’t see it — re-post once
                 logging.info(
                     "[ProgressCard] message_not_found; re-posting progress message in team=%s(%s)",
                     self.team_name, self.team_id,
@@ -127,7 +138,6 @@ class ProgressCard:
             else:
                 logging.exception("[ProgressCard] chat.update error: %s", err)
 
-    # ────────────────────────────────────────────────────────────────
     def maybe_time_bumps(self):
         """Auto-advance progress visually if analysis takes long."""
         elapsed = time.time() - self._start
@@ -136,11 +146,14 @@ class ProgressCard:
         if 75 <= self._pct < 90 and elapsed >= 15:
             self.set(90, "Finalizing…")
 
-    # ────────────────────────────────────────────────────────────────
     def finish(self, ok=True, note: str | None = None):
         """Mark analysis finished successfully or with error."""
         self._pct = 100
         subtitle = note or ("Completed successfully." if ok else "Completed with errors.")
+
+        # Ensure DM resolved (if starting with a user id)
+        self._resolve_dm_if_needed()
+
         if not self.ts:
             return self.start(subtitle)
         try:
