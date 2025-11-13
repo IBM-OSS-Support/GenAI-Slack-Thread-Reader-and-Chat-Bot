@@ -41,6 +41,8 @@ from utils.innovation_report import parse_innovation_sheet
 logging.basicConfig(level=logging.DEBUG)
 from utils.usage_guide import get_usage_guide
 from chains.analyze_thread import analyze_slack_thread, custom_chain, THREAD_ANALYSIS_BLOBS  # NEW
+from slack_sdk.models.blocks import SectionBlock, ActionsBlock, ButtonElement
+from datetime import datetime, timezone, timedelta
 
 
 
@@ -559,6 +561,198 @@ def get_bot_stats():
         f"👍 *{_vote_up_count}*   👎 *{_vote_down_count}*"
     )
 
+# --------------------------
+# Open the first modal
+# --------------------------
+def open_date_time_dialog(client, trigger_id, channel_id, channel_name, origin_channel, thread_ts, user_id, team_id):
+    view = {
+        "type": "modal",
+        "callback_id": "channel_analysis_date_picker",
+        "title": {"type": "plain_text", "text": "Channel Analysis"},
+        "close": {"type": "plain_text", "text": "Cancel"},  # no submit button
+        "private_metadata": json.dumps({
+            "channel_id": channel_id,
+            "channel_name": channel_name,
+            "origin_channel": origin_channel,
+            "thread_ts": thread_ts,
+            "user_id": user_id,
+            "team_id": team_id
+        }),
+        "blocks": [
+            {"type": "section", "text": {"type": "mrkdwn", "text": "Select a timeframe:"}},
+            {
+                "type": "actions",
+                "block_id": "range_selector_block",
+                "elements": [
+                    {"type": "button", "text": {"type": "plain_text", "text": "Last 1 hour"}, "value": "1h", "action_id": "select_1h"},
+                    {"type": "button", "text": {"type": "plain_text", "text": "Last 1 day"}, "value": "1d", "action_id": "select_1d"},
+                    {"type": "button", "text": {"type": "plain_text", "text": "Last 1 week"}, "value": "1w", "action_id": "select_1w"},
+                    {"type": "button", "text": {"type": "plain_text", "text": "Last 1 month"}, "value": "1m", "action_id": "select_1m"},
+                    {"type": "button", "text": {"type": "plain_text", "text": "Last 1 year"}, "value": "1y", "action_id": "select_1y"},
+                    {"type": "button", "text": {"type": "plain_text", "text": "Entire channel"}, "value": "all", "action_id": "select_all"},
+                    {"type": "button", "text": {"type": "plain_text", "text": "Custom range"}, "value": "1w", "action_id": "select_custom"},
+                ]
+            }
+        ]
+    }
+
+    client.views_open(trigger_id=trigger_id, view=view)
+
+def get_creation_timestamp(meta):
+    """Fetch the channel creation timestamp (in seconds)."""
+    try:
+        target_client = get_client_for_team(meta["team_id"])
+        ch_info = target_client.conversations_info(channel=meta["channel_id"])["channel"]
+        created_ts = ch_info.get("created")
+        return int(created_ts) if created_ts else None
+    except Exception as e:
+        logging.getLogger().warning(f"Failed to get creation timestamp for channel {meta.get('channel_id')}: {e}")
+        return None
+
+def get_time_range(value, meta):
+    """Return (oldest_ts, latest_ts) for given range value."""
+    now = datetime.now(timezone.utc)
+    latest_ts = int(now.timestamp())
+
+    # Determine oldest timestamp
+    oldest_ts_map = {
+        "1h": int((now - timedelta(hours=1)).timestamp()),
+        "1d": int((now - timedelta(days=1)).timestamp()),
+        "1w": int((now - timedelta(weeks=1)).timestamp()),
+        "1m": int((now - timedelta(days=30)).timestamp()),
+        "1y": int((now - timedelta(days=365)).timestamp()),
+        "all": get_creation_timestamp(meta),  # Channel creation time
+    }
+
+    oldest_ts = oldest_ts_map.get(value)
+    # fallback: if "all" fails to get creation timestamp, default to 1 year
+    if oldest_ts is None:
+        oldest_ts = int((now - timedelta(days=365)).timestamp())
+
+    return oldest_ts, latest_ts
+
+# --------------------------
+# Handle preset ranges immediately
+# --------------------------
+PRESET_ACTIONS = ["select_1h", "select_1d", "select_1w", "select_1m", "select_1y", "select_all", "select_custom"]
+
+for action_id in PRESET_ACTIONS:
+    @app.action(action_id)
+    def handle_preset_buttons(ack, body, client, logger):
+        ack(response_action="clear")  # acknowledge immediately
+
+        view_id = body["view"]["id"]
+        view_hash = body["view"]["hash"]
+        action = body["actions"][0]
+        value = action["value"]
+
+        # Safely read private metadata
+        meta = json.loads(body.get("view", {}).get("private_metadata", "{}"))
+
+        # Compute timestamps for the selected preset
+        oldest_ts, latest_ts = get_time_range(value,meta)
+
+        view = {
+            "type": "modal",
+            "callback_id": "custom_date_picker_modal",
+            "title": {"type": "plain_text", "text": "Select Custom Date Range"},
+            "submit": {"type": "plain_text", "text": "Run"},
+            "close": {"type": "plain_text", "text": "Cancel"},
+            "private_metadata": json.dumps(meta),
+            "blocks": [
+                {
+                    "type": "input",
+                    "block_id": "oldest_block",
+                    "label": {"type": "plain_text", "text": "Start Date & Time (UTC)"},
+                    "element": {"type": "datetimepicker", "action_id": "oldest", "initial_date_time": oldest_ts}
+                },
+                {
+                    "type": "input",
+                    "block_id": "latest_block",
+                    "label": {"type": "plain_text", "text": "End Date & Time (UTC)"},
+                    "element": {"type": "datetimepicker", "action_id": "latest", "initial_date_time": latest_ts}
+                }
+            ]
+        }
+
+        client.views_update(
+            view_id=view_id,
+            hash=view_hash,
+            view=view
+        )
+
+# --------------------------
+# Handle date submission
+# --------------------------
+@app.view("custom_date_picker_modal")
+def handle_custom_date_submission(ack, body, client, logger):
+    ack()  # always ack first
+
+    try:
+        values = body["view"]["state"]["values"]
+        meta = json.loads(body["view"].get("private_metadata", "{}"))
+
+        oldest_ts = values["oldest_block"]["oldest"]["selected_date_time"]
+        latest_ts = values["latest_block"]["latest"]["selected_date_time"]
+
+        oldest_str = datetime.fromtimestamp(oldest_ts).strftime("%b %-d, %Y (%-I:%M %p)")
+        latest_str = datetime.fromtimestamp(latest_ts).strftime("%b %-d, %Y (%-I:%M %p)")
+
+        channel_id = meta["channel_id"]
+        target_team_id = meta["team_id"]
+
+        target_client = get_client_for_team(target_team_id)
+
+        try:
+            ch_info = target_client.conversations_info(channel=channel_id)["channel"]
+            channel_name = ch_info.get("name") or ch_info.get("name_normalized") or channel_id
+        except Exception as e:
+            logger = logging.getLogger()
+            logger.debug(f"Failed to fetch channel info for {channel_id} in {target_team_id}: {e}")
+            channel_name = channel_id
+        
+        try:
+            auth_resp = target_client.auth_test()
+            team_name = auth_resp.get("team") or auth_resp.get("url", "").split("//")[-1].split(".")[0] or target_team_id
+        except Exception as e:
+            logger = logging.getLogger()
+            logger.debug(f"auth_test failed for team ({team_name}) {target_team_id}: {e}")
+            team_name = target_team_id
+
+        # NEW: Progress card for channel analysis (post progress to the user's DM 'ch')
+        card = ProgressCard(
+            client=target_client,
+            channel=meta["origin_channel"],
+            thread_ts=meta["thread_ts"],
+            title=f"Analyzing Channel #{channel_name} [{oldest_str} to {latest_str}]"  # #{raw} for channel Id
+        )
+
+        card.start("Fetching channel messages…")
+        summary = analyze_entire_channel(
+            target_client,
+            meta["channel_id"],
+            meta["thread_ts"],
+            oldest=oldest_ts,
+            latest=latest_ts,
+            progress_card_cb=lambda pct, note: card.set(pct, note)
+        )
+        summary = summary.replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
+        card.finish(ok=True, note="Completed.")
+        
+        send_message(target_client, meta["origin_channel"], summary, thread_ts=meta["thread_ts"], user_id=meta["user_id"], export_pdf=True)
+        _get_memory(meta["thread_ts"]).save_context(
+            {"human_input": f"ANALYZE #{channel_id} (team {target_team_id})"},
+            {"output": summary}
+        )
+
+    except Exception as e:
+        logger.exception(f"Error handling custom date submission: {e}")
+        client.chat_postMessage(
+            channel=meta.get("origin_channel", meta.get("user_id")),
+            text=f"❌ Failed to analyze channel: `{e}`",
+            thread_ts=meta.get("thread_ts")
+        )
+
 def process_conversation(client: WebClient, event, text: str):
     ch      = event["channel"]
     ts      = event["ts"]
@@ -731,66 +925,31 @@ def process_conversation(client: WebClient, event, text: str):
 
         # Run analysis using the correct workspace client
         try:
-            target_client = get_client_for_team(target_team_id)
-
-            # Resolve channel name in the target workspace (fall back to ID on error)
-            try:
-                ch_info = target_client.conversations_info(channel=channel_id)["channel"]
-                channel_name = ch_info.get("name") or ch_info.get("name_normalized") or channel_id
-            except Exception as e:
-                logger = logging.getLogger()
-                logger.debug(f"Failed to fetch channel info for {channel_id} in {target_team_id}: {e}")
-                channel_name = channel_id
-
-            # Resolve team (workspace) friendly name via auth_test() (fall back to team id)
-            try:
-                auth_resp = target_client.auth_test()
-                team_name = auth_resp.get("team") or auth_resp.get("url", "").split("//")[-1].split(".")[0] or target_team_id
-            except Exception as e:
-                logger = logging.getLogger()
-                logger.debug(f"auth_test failed for team ({team_name}) {target_team_id}: {e}")
-                team_name = target_team_id
-
-            # NEW: Progress card for channel analysis (post progress to the user's DM 'ch')
-            card = ProgressCard(
-                client=target_client,
-                channel=ch,
-                thread_ts=thread,
-                title=f"Analyzing Channel (#{channel_name})"  # #{raw} for channel Id
+            client.chat_postMessage(
+            channel=ch,
+            text=f"Click below to analyze #{raw} with custom dates:",
+            blocks=[
+                SectionBlock(text=f"Analyze #{raw}").to_dict(),
+                ActionsBlock(
+                    elements=[
+                        ButtonElement(
+                            text="Select Dates & Analyze",
+                            action_id="analyze_channel_button",
+                            value=json.dumps({
+                                "channel_id": channel_id,
+                                "channel_name": raw,
+                                "origin_channel": ch,
+                                "thread_ts": thread,
+                                "team_id": target_team_id,
+                                "user_id": uid
+                            })
+                        ).to_dict()
+                    ]
+                ).to_dict()
+            ],
+            thread_ts=thread
             )
-            card.start("Fetching channel messages…")
-
-            def _run_with_progress(c: WebClient):
-                return analyze_entire_channel(
-                    c,
-                    channel_id,
-                    thread,
-                    # pass progress + time-bump callbacks just like thread analysis
-                    progress_card_cb=lambda pct, note: card.set(pct, note),
-                    time_bump=lambda: card.maybe_time_bumps(),
-                )
-
-            # If you want the same cross-workspace fallback pattern:
-            # summary_team_id, summary = ROUTER.try_call(target_team_id, _run_with_progress)
-            # Otherwise, just call directly:
-            summary = _run_with_progress(target_client)
-
-            summary = summary.replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
-            card.finish(ok=True, note="Completed.")
-
-            send_message(
-                get_client_for_team(target_team_id),
-                ch if ch.startswith("D") else ch,
-                summary,
-                thread_ts=thread,
-                user_id=uid,
-                export_pdf=True  # keep parity with thread export behavior if desired
-            )
-
-            _get_memory(thread).save_context(
-                {"human_input": f"ANALYZE #{channel_id} (team {target_team_id})"},
-                {"output": summary}
-            )
+            return
 
         except Exception as e:
             try:
@@ -1753,6 +1912,26 @@ def handle_analyze_thread_button(ack, body, client, logger):
     fake = {"type":"message","user":user,"text":url,"channel":user,"ts":body["actions"][0]["action_ts"]}
     do_analysis(None, fake, client)
 
+@app.action("analyze_channel_button")
+def handle_analyze_channel_button(ack, body, client, logger):
+    ack()  # Always acknowledge
+
+    # `trigger_id` is available here because this is an interactive action
+    trigger_id = body["trigger_id"]
+    meta = json.loads(body["actions"][0]["value"])
+
+    open_date_time_dialog(
+        client=client,
+        trigger_id=trigger_id,
+        channel_id=meta["channel_id"],
+        channel_name=meta["channel_name"],
+        origin_channel=meta["origin_channel"],
+        thread_ts=meta["thread_ts"],
+        user_id=meta["user_id"],
+        team_id=meta["team_id"]
+    )
+
+'''
 # Analyze Channel button
 @app.action("analyze_channel_button")
 def handle_analyze_channel_button(ack, body, client, logger):
@@ -1761,6 +1940,7 @@ def handle_analyze_channel_button(ack, body, client, logger):
     cid = body["view"]["state"]["values"]["channel_input_block"]["analyze_channel_select"]["selected_conversation"]
     fake = {"type":"message","user":user,"text":f"analyze <#{cid}>","channel":user,"ts":body["actions"][0]["action_ts"]}
     do_analysis(None, fake, client)
+'''
 
 @app.action("button_click")
 def handle_button_click(ack, body, client, logger):
