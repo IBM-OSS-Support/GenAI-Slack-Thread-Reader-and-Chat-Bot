@@ -43,6 +43,8 @@ from utils.usage_guide import get_usage_guide
 from chains.analyze_thread import analyze_slack_thread, custom_chain, THREAD_ANALYSIS_BLOBS  # NEW
 
 
+
+
 # Instantiate a single global vector store
 # THREAD_VECTOR_STORES: dict[str, FaissVectorStore] = {}
 if not os.path.exists("data"):
@@ -636,6 +638,20 @@ def process_conversation(client: WebClient, event, text: str):
         return
 
     logging.debug("🔔 Processing: %s", resolve_user_mentions(client, cleaned).strip())
+    if is_followup and (thread in ANALYSIS_THREADS) and THREAD_ANALYSIS_BLOBS.get(thread):
+        try:
+            focused = custom_chain.invoke({
+                "messages": THREAD_ANALYSIS_BLOBS[thread],
+                "instructions": normalized
+            }).strip()
+        except Exception:
+            # graceful fallback
+            focused = process_message_mcp(normalized, thread)
+
+        USAGE_STATS["analyze_followups"] += 1
+        save_stats()
+        send_message(client, ch, focused, thread_ts=thread, user_id=uid)
+        return
 
     # Follow-up analysis in threads
     if is_followup and (thread in ANALYSIS_THREADS) and THREAD_ANALYSIS_BLOBS.get(thread):
