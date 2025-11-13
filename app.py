@@ -44,7 +44,10 @@ from chains.analyze_thread import analyze_slack_thread, custom_chain,THREAD_ANAL
 
 # ========================================================================================================================
 #todo
-from helper.MainToDo import handle_dm_extraction,handle_channel_extraction,handle_thread_extraction
+
+from helper.MainToDo import handle_dm_extraction,handle_channel_extraction,handle_thread_extraction,show_user_tasks
+from db import check_existing_task, delete_task, get_user_tasks, save_task_to_db
+
 # ========================================================================================================================
 
 
@@ -1112,53 +1115,63 @@ def handle_direct_message(body,event, client: WebClient, logger):
             thread_ts=thread_ts, user_id=user_id
         )
         return
-
+    
     # hand off to your RAG/chat engine exactly as you do in handle_app_mention
     process_conversation(client, event, text)
+
+
 @app.event("app_mention")
+
 def handle_app_mention(body, event, say, client, logger):
-    real_team = detect_real_team_from_event(body, event)
-# ========================================================================================================================
-#########################ToDo action item starting ###################################################
+ # ===============================================================================================================
+ # ToDo  action item starting here   
     """
     Handle app mentions for channel, thread, and DM extraction
     """
-    text = event.get("text", "")
+    text = event.get("text", "").strip()
     channel_id = event.get("channel")
     thread_ts = event.get("thread_ts")
     event_ts = event.get("ts")
-    
-    # Check for DM extraction
+
+    # === Extraction Handling ===
+    extraction_handled = False  # Flag to ensure exclusivity
+
     if "extract dm between" in text.lower():
         handle_dm_extraction(event, client)
-    # Check for channel extraction
-    elif "extract from" in text and "from" in text and "to" in text:
+        extraction_handled = True
+    elif all(keyword in text.lower() for keyword in ["extract from", "from", "to"]):
         handle_channel_extraction(event, client)
-    # Check for thread extraction
+        extraction_handled = True
     elif thread_ts:
         handle_thread_extraction(event, client)
+        extraction_handled = True
     else:
-        # Default response with all options
+        # Default response only if it's not file or DM extraction
         response_ts = thread_ts or event_ts
         client.chat_postMessage(
             channel=channel_id,
             thread_ts=response_ts,
-            text="I can help you extract tasks from:\n\n"
+            text=(
+                "I can help you extract tasks from:\n\n"
                 "• Channels: @Todo Assistant extract from channel_name from YYYY-MM-DD to YYYY-MM-DD\n"
                 "• Threads: Mention me in any thread\n"
                 "• DMs: @Todo Assistant extract dm between user1 user2 from YYYY-MM-DD to YYYY-MM-DD"
+            )
         )
-##########################ToDo action item ending ###################################################
-# ========================================================================================================================
+# ToDo  action item ending here
+# ===============================================================================================================
+    # === Only run the following if extraction was NOT triggered ===
+    if not extraction_handled:
+        real_team = detect_real_team_from_event(body, event)
+        client = get_client_for_team(real_team)
 
-    # 2) rebind your client
-    client = get_client_for_team(real_team)
-    # If a file is attached during the mention, treat it as file_share
-    if event.get("files"):
-        # Pass body as well to handle_file_share
-        return handle_file_share(body, event, client, logger)
-    # Otherwise, normal conversation
-    process_conversation(client, event, event.get("text", "").strip())
+        # Handle file attachments
+        if event.get("files"):
+            return handle_file_share(body, event, client, logger)
+
+        # Otherwise, handle regular conversation
+        process_conversation(client, event, text)
+
 
 def do_analysis(body,event: dict, client: WebClient):
     real_team = detect_real_team_from_event(body, event)
@@ -1172,7 +1185,10 @@ def do_analysis(body,event: dict, client: WebClient):
     # Otherwise, normal conversation
     process_conversation(client, event, event.get("text", "").strip())
 
-
+@app.action("task_checkbox_3")
+def handle_some_action(ack, body, logger):
+    ack()
+    logger.info(body)
 @app.action("select_channel_to_join")
 def handle_conversation_select(ack, body, client, logger):
     
@@ -1487,7 +1503,154 @@ def handle_button_click(ack, body, client, logger):
         client.chat_postMessage(channel=user, text="You clicked the button! ?")
     except Exception as e:
         logger.error(f"Error responding to button click: {e}")
+# ===============================================================================================================
+######ToDo action  item starting here
+@app.action(re.compile("task_checkbox_.*"))
+def handle_task_checkbox(ack, body, action,logger=None):
+    ack()
+    try:
+        user_id = body["user"]["id"]
+        channel_id = body["channel"]["id"]
+        message_ts = body["message"]["ts"]
 
+        user_info = app.client.users_info(user=user_id)
+        user_name = user_info["user"]["profile"].get("display_name") or user_info["user"]["profile"].get("real_name") or user_info["user"]["name"]
+
+        selected = action.get("selected_options", [])
+        if not selected:
+            return
+
+        value = selected[0]["value"]
+        assigned_user, task_description, deadline = value.split("|")
+
+        if assigned_user.lower() != user_name.lower():
+            app.client.chat_postEphemeral(
+                channel=channel_id,
+                user=user_id,
+                text=f"Only {assigned_user} can claim this task."
+            )
+            return
+        
+        if check_existing_task(user_id, task_description):
+            app.client.chat_postEphemeral(
+                channel=channel_id,
+                user=user_id,
+                text=f"You already claimed this task: {task_description}"
+            )
+            logger.info(f"Duplicate task prevented for user={user_name}: {task_description}")
+            return
+        
+        task_id = save_task_to_db(
+            user_id=user_id,
+            user_name=user_name,
+            task_description=task_description,
+            deadline=None if deadline == "No Deadline" else deadline,
+            channel_id=channel_id,
+            message_ts=message_ts,
+            original_thread_ts=None
+        )
+
+        if task_id:
+            app.client.chat_postMessage(
+                channel=channel_id,
+                thread_ts=message_ts,
+                text=f"Task claimed by {user_name}\nTask: {task_description}\nDeadline: {deadline}\nTask ID: {task_id}"
+            )
+            logger.info(f"Task claimed successfully: ID={task_id}, User={user_name}")
+
+    except Exception as e:
+        logger.error(f"Error handling checkbox: {str(e)}", exc_info=True)
+        app.client.chat_postEphemeral(
+            channel=channel_id,
+            user=user_id,
+            text=f"Error claiming task. Please try again."
+        )
+
+@app.action("claim_task_action")
+def handle_claim_task_action(ack, body, client, logger=None):
+    ack()
+    try:
+        user_id = body["user"]["id"]
+        user_info = client.users_info(user=user_id)
+        user_name = user_info["user"]["profile"]["real_name"]
+
+        channel_id = body["channel"]["id"]
+        message_ts = body["message"]["ts"]
+        original_thread_ts = body.get("container", {}).get("thread_ts")
+
+        action = body["actions"][0]
+
+        selected = [opt["value"] for opt in action.get("selected_options", [])]
+        previous = [opt["value"] for opt in action.get("initial_options", [])] if action.get("initial_options") else []
+
+        new_selection = list(set(selected) - set(previous))
+        if not new_selection:
+            logger.info("No new checkbox selected (could be deselection).")
+            return
+
+        value = new_selection[0]
+
+        parts = value.split("|")
+        if len(parts) >= 3:
+            responsible = parts[0].strip() or user_name
+            task_description = parts[1].strip()
+            deadline = parts[2].strip()
+        elif len(parts) == 2:
+            responsible = parts[0].strip() or user_name
+            task_description = parts[1].strip()
+            deadline = ""
+        else:
+            responsible = user_name
+            task_description = value.strip()
+            deadline = ""
+
+        if not task_description:
+            client.chat_postEphemeral(
+                channel=channel_id,
+                user=user_id,
+                text="?? Could not extract task description."
+            )
+            return
+
+        task_id = save_task_to_db(
+            user_id=user_id,
+            user_name=user_name,
+            task_description=task_description,
+            deadline=deadline if deadline and deadline != "No Deadline" else None,
+            channel_id=channel_id,
+            message_ts=message_ts,
+            original_thread_ts=original_thread_ts,
+        )
+
+        if task_id:
+            client.chat_postEphemeral(
+                channel=channel_id,
+                user=user_id,
+                text=(
+                    f"? *Task claimed by {user_name}*\n"
+                    f"*Task:* {task_description}\n"
+                    f"*Deadline:* {deadline or 'No Deadline'}\n"
+                    f"*Task ID:* `{task_id}`"
+                )
+            )
+        else:
+            client.chat_postEphemeral(
+                channel=channel_id,
+                user=user_id,
+                text=f"? Failed to save task: {task_description}"
+            )
+
+    except Exception as e:
+        logger.error(f"Error handling claim task: {e}", exc_info=True)
+        client.chat_postEphemeral(
+            channel=body.get("channel", {}).get("id", ""),
+            user=body.get("user", {}).get("id", ""),
+            text=f"Error saving task: {str(e)}"
+        )
+
+
+######ToDo action  item ending here
+# ===============================================================================================================
 
 if __name__=="__main__":
     try:
