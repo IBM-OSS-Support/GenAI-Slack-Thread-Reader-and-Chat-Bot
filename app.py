@@ -1609,7 +1609,7 @@ def handle_conversation_select(ack, body, client, logger):
                 # Public channel: bot can join itself
                 candidate_client.conversations_join(channel=selected_channel)
                 msg = f"✅ I joined <#{selected_channel}>. You can see me in the channel." # in team `{tid}`."
-                candidate_client.chat_postMessage(channel=selected_channel, text="👋 Hey — I’m here to help!\n _For Usage Instructions: type `@Ask-Support help/usage`._")
+                candidate_client.chat_postMessage(channel=selected_channel, text="👋 Hey — I’m here to help!\n _For Usage Instructions: type `@Ask-Support help`._")
                 client.chat_postMessage(channel=user_id, text=msg)
                 logger.info(msg)
                 success = True
@@ -1620,7 +1620,7 @@ def handle_conversation_select(ack, body, client, logger):
                 # Invite the bot user (the caller of invite must have permission; this will often succeed when using workspace bot token)
                 candidate_client.conversations_invite(channel=selected_channel, users=bot_user_id)
                 msg = f"✅ I was invited to the private channel <#{selected_channel}>. You can see me in the channel." # in team `{tid}`."
-                candidate_client.chat_postMessage(channel=selected_channel, text="👋 I was added — ready to help!\n _For Usage Instructions: type `@Ask-Support help/usage`._")
+                candidate_client.chat_postMessage(channel=selected_channel, text="👋 I was added — ready to help!\n _For Usage Instructions: type `@Ask-Support help`._")
                 client.chat_postMessage(channel=user_id, text=msg)
                 logger.info(msg)
                 success = True
