@@ -13,3 +13,4 @@ data
 
 # logs
 *.log
+.vscode/launch.json
