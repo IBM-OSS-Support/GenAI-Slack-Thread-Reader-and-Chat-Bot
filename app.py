@@ -40,6 +40,7 @@ from utils.health import health_app, run_health_server
 from utils.innovation_report import parse_innovation_sheet
 logging.basicConfig(level=logging.DEBUG)
 from utils.usage_guide import get_usage_guide
+from chains.analyze_thread import analyze_slack_thread, custom_chain, THREAD_ANALYSIS_BLOBS  # NEW
 
 
 # Instantiate a single global vector store
@@ -569,6 +570,7 @@ def process_conversation(client: WebClient, event, text: str):
         _memories.pop(thread, None)
         _last_activity.pop(thread, None)
         _active_sessions.pop(thread, None)
+        THREAD_ANALYSIS_BLOBS.pop(thread, None)  # NEW: drop saved blob on expiry
         send_message(
             client, ch,
             f"⚠️ Conversation expired ({mins}m). Start a new one.",
@@ -635,6 +637,21 @@ def process_conversation(client: WebClient, event, text: str):
 
     logging.debug("🔔 Processing: %s", resolve_user_mentions(client, cleaned).strip())
 
+    # Follow-up analysis in threads
+    if is_followup and (thread in ANALYSIS_THREADS) and THREAD_ANALYSIS_BLOBS.get(thread):
+        try:
+            focused = custom_chain.invoke({
+                "messages": THREAD_ANALYSIS_BLOBS[thread],
+                "instructions": normalized
+            }).strip()
+        except Exception:
+            # graceful fallback
+            focused = process_message_mcp(normalized, thread)
+
+        USAGE_STATS["analyze_followups"] += 1
+        save_stats()
+        send_message(client, ch, focused, thread_ts=thread, user_id=uid)
+        return
     
     # Help command
     if resolve_user_mentions(client, cleaned).strip() == "" and not event.get("files"):
@@ -829,6 +846,14 @@ def process_conversation(client: WebClient, event, text: str):
                 thread_ts=thread,
                 user_id=uid,
                 export_pdf=(cid in FORMATTED_CHANNELS)
+            )
+            send_message(
+                get_client_for_team(target_team_id),
+                ch,
+                "💬 Want a deeper dive? Reply in *this thread* with your question "
+                "(e.g., *explain the timeline*, *why did we escalate*, *expand Business Impact*).",
+                thread_ts=thread,
+                user_id=uid
             )
             _get_memory(thread).save_context(
                 {"human_input": f"{cmd.upper() or 'ANALYZE'} {ts10} (team {target_team_id})"},
