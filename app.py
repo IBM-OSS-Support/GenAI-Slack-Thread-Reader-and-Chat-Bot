@@ -584,7 +584,6 @@ def open_date_time_dialog(client, trigger_id, channel_id, channel_name, origin_c
                 "type": "actions",
                 "block_id": "range_selector_block",
                 "elements": [
-                    {"type": "button", "text": {"type": "plain_text", "text": "Last 1 hour"}, "value": "1h", "action_id": "select_1h"},
                     {"type": "button", "text": {"type": "plain_text", "text": "Last 1 day"}, "value": "1d", "action_id": "select_1d"},
                     {"type": "button", "text": {"type": "plain_text", "text": "Last 1 week"}, "value": "1w", "action_id": "select_1w"},
                     {"type": "button", "text": {"type": "plain_text", "text": "Last 1 month"}, "value": "1m", "action_id": "select_1m"},
@@ -616,7 +615,6 @@ def get_time_range(value, meta):
 
     # Determine oldest timestamp
     oldest_ts_map = {
-        "1h": int((now - timedelta(hours=1)).timestamp()),
         "1d": int((now - timedelta(days=1)).timestamp()),
         "1w": int((now - timedelta(weeks=1)).timestamp()),
         "1m": int((now - timedelta(days=30)).timestamp()),
@@ -634,7 +632,7 @@ def get_time_range(value, meta):
 # --------------------------
 # Handle preset ranges immediately
 # --------------------------
-PRESET_ACTIONS = ["select_1h", "select_1d", "select_1w", "select_1m", "select_1y", "select_all", "select_custom"]
+PRESET_ACTIONS = ["select_1d", "select_1w", "select_1m", "select_1y", "select_all", "select_custom"]
 
 for action_id in PRESET_ACTIONS:
     @app.action(action_id)
@@ -925,11 +923,20 @@ def process_conversation(client: WebClient, event, text: str):
 
         # Run analysis using the correct workspace client
         try:
+            target_client = get_client_for_team(target_team_id)
+            try:
+                ch_info = target_client.conversations_info(channel=channel_id)["channel"]
+                channel_name = ch_info.get("name") or ch_info.get("name_normalized") or channel_id
+            except Exception as e:
+                logger = logging.getLogger()
+                logger.debug(f"Failed to fetch channel info for {channel_id} in {target_team_id}: {e}")
+                channel_name = channel_id
+
             client.chat_postMessage(
             channel=ch,
             text=f"Click below to analyze #{raw} with custom dates:",
             blocks=[
-                SectionBlock(text=f"Analyze #{raw}").to_dict(),
+                SectionBlock(text=f"Analyze #{channel_name}").to_dict(),
                 ActionsBlock(
                     elements=[
                         ButtonElement(
@@ -937,7 +944,7 @@ def process_conversation(client: WebClient, event, text: str):
                             action_id="analyze_channel_button",
                             value=json.dumps({
                                 "channel_id": channel_id,
-                                "channel_name": raw,
+                                "channel_name": channel_name,
                                 "origin_channel": ch,
                                 "thread_ts": thread,
                                 "team_id": target_team_id,
@@ -952,10 +959,6 @@ def process_conversation(client: WebClient, event, text: str):
             return
 
         except Exception as e:
-            try:
-                card.finish(ok=False, note="Failed.")
-            except Exception:
-                pass
             send_message(
                 client, ch,
                 (
