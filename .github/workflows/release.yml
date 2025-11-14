@@ -16,10 +16,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout full history
+      - name: Checkout full history & tags
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -29,7 +31,20 @@ jobs:
       - name: Install python-semantic-release
         run: pip install python-semantic-release
 
+      - name: Debug git info (CI)
+        run: |
+          echo "===== git status ====="
+          git status --porcelain --branch
+          echo "===== current branch ====="
+          git rev-parse --abbrev-ref HEAD || true
+          echo "GITHUB_REF=$GITHUB_REF"
+          echo "===== recent commits ====="
+          git --no-pager log -n 5 --oneline
+          echo "===== tags ====="
+          git tag --list
+          git describe --tags --abbrev=0 || echo "no tags found"
+
       - name: Run python-semantic-release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: semantic-release publish
+        run: semantic-release publish -vv
