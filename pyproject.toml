@@ -29,7 +29,7 @@ commit_message = "chore(release): {version} [skip ci]"
 post_release_hook = "python utils/scripts/update-version-txt.py"
 
 [tool.semantic_release.branches.automate-test-branch]
-match = "automate-test-branch"
+match = "^automate-test-branch$"
 prerelease = false
 
 # Uncomment/add your real branches when ready:
