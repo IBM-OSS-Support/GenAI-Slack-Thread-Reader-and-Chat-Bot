@@ -29,8 +29,8 @@ changelog_sections = "feature,fix,breaking,chore,docs,style,refactor"
 # Don't upload to PyPI
 upload_to_pypi = false
 
-# Commit message parser (Conventional Commits)
-commit_parser = "semantic_release.commit_parser.conventional"
+# commit‑parser import path for v9+
+commit_parser = "semantic_release.commit_parser:AngularCommitParser"
 
 # Detect current version from git tags
 version_source = "tag"
