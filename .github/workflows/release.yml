@@ -44,7 +44,7 @@ jobs:
           git tag --list
           git describe --tags --abbrev=0 || echo "no tags found"
 
-      - name: Run python-semantic-release
+      - name: Run python-semantic-release (verbose)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: semantic-release publish -vv
+        run: semantic-release -vv publish
