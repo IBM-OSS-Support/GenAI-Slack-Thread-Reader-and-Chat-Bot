@@ -28,15 +28,12 @@ post_release_hook = "python utils/scripts/update_version_txt.py"
 commit_message = "chore(release): {version} [skip ci]"
 
 # --- Release settings for v10+ syntax ---
-[[tool.semantic_release.branches]]
-name = "automate-test-branch"
+[tool.semantic_release.branches.automate-test-branch]
 prerelease = false
 
-# Add your real branches once testing works
-# [[tool.semantic_release.branches]]
-# name = "dev"
+# Uncomment/add real branches later:
+# [tool.semantic_release.branches.dev]
 # prerelease = false
 #
-# [[tool.semantic_release.branches]]
-# name = "main"
+# [tool.semantic_release.branches.main]
 # prerelease = false
