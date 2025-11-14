@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - automate-test-branch
+      # - dev
+      # - main
 
 permissions:
   contents: write
@@ -12,7 +14,6 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout full history & tags
         uses: actions/checkout@v4
@@ -21,32 +22,54 @@ jobs:
           fetch-tags: true
           persist-credentials: true
 
-      - name: Set up Python
+      - name: Set up Python (3.11)
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
 
-      - name: Install python-semantic-release
-        run: pip install python-semantic-release
-
-      - name: Print semantic-release config read by CI
+      - name: Install python-semantic-release and debug deps
         run: |
-              python - <<'PY'
-              import tomllib, pathlib, json, sys
-              p = pathlib.Path('pyproject.toml')
-              if not p.exists():
-                  print("pyproject.toml not found", file=sys.stderr); sys.exit(2)
-              cfg = tomllib.loads(p.read_text(encoding='utf8'))
-              sr = cfg.get("tool", {}).get("semantic_release", {})
-              print("semantic_release top-level keys:", list(sr.keys()))
-              print("version_source:", sr.get("version_source"))
-              print("patch_without_tag:", sr.get("patch_without_tag"))
-              print("post_release_hook:", sr.get("post_release_hook"))
-              print("branches keys:", list(sr.get("branches", {}).keys()))
-              print(json.dumps(sr, indent=2))
-              PY
+          python -m pip install --upgrade pip
+          pip install python-semantic-release tomli
 
-      - name: Run python-semantic-release (commit-based)
+      - name: Print semantic-release config read by CI (safe for py3.10/3.11)
+        run: |
+          python - <<'PY'
+          # works on both Python 3.11 (tomllib) and 3.10 (tomli)
+          try:
+              import tomllib
+          except Exception:
+              import tomli as tomllib
+          import pathlib, json, sys
+          p = pathlib.Path('pyproject.toml')
+          if not p.exists():
+              print("pyproject.toml not found", file=sys.stderr); sys.exit(2)
+          cfg = tomllib.loads(p.read_text(encoding='utf8'))
+          sr = cfg.get("tool", {}).get("semantic_release", {})
+          print("semantic_release top-level keys:", list(sr.keys()))
+          print("version_source:", sr.get("version_source"))
+          print("patch_without_tag:", sr.get("patch_without_tag"))
+          print("post_release_hook:", sr.get("post_release_hook"))
+          print("branches keys:", list(sr.get("branches", {}).keys()))
+          print(json.dumps(sr, indent=2))
+          PY
+
+      - name: Debug git info (CI)
+        run: |
+          echo "===== git status ====="
+          git status --porcelain --branch
+          echo "===== current branch ====="
+          git rev-parse --abbrev-ref HEAD || true
+          echo "GITHUB_REF=$GITHUB_REF"
+          echo "===== recent commits ====="
+          git --no-pager log -n 5 --oneline
+          echo "===== local tags ====="
+          git tag --list
+          echo "===== remote tags ====="
+          git ls-remote --tags origin | sed -n '1,50p' || true
+          git describe --tags --abbrev=0 || echo "no tags found"
+
+      - name: Run python-semantic-release (commit-based, verbose)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: semantic-release publish
+        run: semantic-release -vv publish
