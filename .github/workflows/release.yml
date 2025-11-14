@@ -29,7 +29,7 @@ jobs:
       - name: Install python-semantic-release
         run: pip install python-semantic-release
 
-      - name: Run semantic-release using custom config
+      - name: Run python-semantic-release using custom config
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: semantic-release ci --config release_config.toml
+        run: python utils/scripts/run_release.py
