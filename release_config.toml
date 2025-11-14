@@ -20,7 +20,7 @@ authors = [{ name = "IBM OSS Support" }]
 # ==========================================================
 [tool.semantic_release]
 # Which branches should trigger releases
-branch = ["dev", "main"]
+branch = ["automate-test-branch"]
 
 # Your timeline-style changelog
 changelog_file = "release-note.md"
