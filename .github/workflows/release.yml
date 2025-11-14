@@ -3,9 +3,9 @@ name: Automated Release - GenAI Slack Thread Reader and Chat Bot
 on:
   push:
     branches:
+      - automate-test-branch
       # - dev
       # - main
-      - automate-test-branch
 
 permissions:
   contents: write
@@ -29,7 +29,7 @@ jobs:
       - name: Install python-semantic-release
         run: pip install python-semantic-release
 
-      - name: Run python-semantic-release using custom config
+      - name: Run python-semantic-release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python utils/scripts/run_release.py
+        run: semantic-release publish --verbosity=DEBUG
