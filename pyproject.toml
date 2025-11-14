@@ -19,17 +19,17 @@ authors = [{ name = "IBM OSS Support" }]
 # Semantic-release configuration
 # ==========================================================
 [tool.semantic_release]
+version_source = "commit"
+patch_without_tag = true
+commit_parser = "semantic_release.commit_parser:AngularCommitParser"
 changelog_file = "release-note.md"
 changelog_sections = "feature,fix,breaking,chore,docs,style,refactor"
 upload_to_pypi = false
-commit_parser = "semantic_release.commit_parser:AngularCommitParser"
-version_source = "tag"
-post_release_hook = "python utils/scripts/update_version_txt.py"
 commit_message = "chore(release): {version} [skip ci]"
+post_release_hook = "python utils/scripts/update-version-txt.py"
 
-# Use mapping form required by python-semantic-release v10+
 [tool.semantic_release.branches.automate-test-branch]
-match = "automate-test-branch"
+match = "^automate-test-branch$"
 prerelease = false
 
 # Uncomment/add your real branches when ready:
