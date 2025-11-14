@@ -16,10 +16,17 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Print git info (debug)
+        run: |
+          git status --porcelain --branch
+          git rev-parse --abbrev-ref HEAD || true
+          echo "GITHUB_REF=$GITHUB_REF"
+    
       - name: Checkout full history
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v5

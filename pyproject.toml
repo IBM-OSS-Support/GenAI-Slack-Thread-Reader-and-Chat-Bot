@@ -29,11 +29,14 @@ commit_message = "chore(release): {version} [skip ci]"
 
 # --- Release settings for v10+ syntax ---
 [tool.semantic_release.branches.automate-test-branch]
+match = "automate-test-branch"
 prerelease = false
 
 # Uncomment/add real branches later:
 # [tool.semantic_release.branches.dev]
+# match = "dev"
 # prerelease = false
 #
 # [tool.semantic_release.branches.main]
+# match = "main"
 # prerelease = false
