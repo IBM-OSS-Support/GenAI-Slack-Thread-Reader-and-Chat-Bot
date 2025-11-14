@@ -5,6 +5,7 @@ on:
     branches:
       - dev
       - main
+      - automate-test-branch
 
 permissions:
   contents: write
