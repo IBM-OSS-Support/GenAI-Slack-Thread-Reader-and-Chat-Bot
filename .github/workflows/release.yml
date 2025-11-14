@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - automate-test-branch
-      # - dev
-      # - main
 
 permissions:
   contents: write
@@ -31,20 +29,7 @@ jobs:
       - name: Install python-semantic-release
         run: pip install python-semantic-release
 
-      - name: Debug git info (CI)
-        run: |
-          echo "===== git status ====="
-          git status --porcelain --branch
-          echo "===== current branch ====="
-          git rev-parse --abbrev-ref HEAD || true
-          echo "GITHUB_REF=$GITHUB_REF"
-          echo "===== recent commits ====="
-          git --no-pager log -n 5 --oneline
-          echo "===== tags ====="
-          git tag --list
-          git describe --tags --abbrev=0 || echo "no tags found"
-
-      - name: Run python-semantic-release (verbose)
+      - name: Run python-semantic-release (commit-based)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: semantic-release -vv publish
+        run: semantic-release publish
