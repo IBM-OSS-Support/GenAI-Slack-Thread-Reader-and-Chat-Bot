@@ -27,8 +27,16 @@ version_source = "tag"
 post_release_hook = "python utils/scripts/update_version_txt.py"
 commit_message = "chore(release): {version} [skip ci]"
 
-[tool.semantic_release.branches]
-automate-test-branch = { prerelease = false }
-# Uncomment your real ones once tested
-# dev = {}
-# main = {}
+# Each branch is a table entry in an array of [[branches]]
+[[tool.semantic_release.branches]]
+name = "automate-test-branch"
+prerelease = false      # will publish a normal release
+
+# later you can add others:
+# [[tool.semantic_release.branches]]
+# name = "dev"
+# prerelease = false
+#
+# [[tool.semantic_release.branches]]
+# name = "main"
+# prerelease = false
