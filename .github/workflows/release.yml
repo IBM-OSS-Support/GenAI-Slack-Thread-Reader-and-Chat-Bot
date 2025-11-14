@@ -3,8 +3,8 @@ name: Automated Release - GenAI Slack Thread Reader and Chat Bot
 on:
   push:
     branches:
-      - dev
-      - main
+      # - dev
+      # - main
       - automate-test-branch
 
 permissions:
