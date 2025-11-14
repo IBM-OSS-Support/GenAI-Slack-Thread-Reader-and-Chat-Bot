@@ -29,6 +29,23 @@ jobs:
       - name: Install python-semantic-release
         run: pip install python-semantic-release
 
+      - name: Print semantic-release config read by CI
+        run: |
+              python - <<'PY'
+              import tomllib, pathlib, json, sys
+              p = pathlib.Path('pyproject.toml')
+              if not p.exists():
+                  print("pyproject.toml not found", file=sys.stderr); sys.exit(2)
+              cfg = tomllib.loads(p.read_text(encoding='utf8'))
+              sr = cfg.get("tool", {}).get("semantic_release", {})
+              print("semantic_release top-level keys:", list(sr.keys()))
+              print("version_source:", sr.get("version_source"))
+              print("patch_without_tag:", sr.get("patch_without_tag"))
+              print("post_release_hook:", sr.get("post_release_hook"))
+              print("branches keys:", list(sr.get("branches", {}).keys()))
+              print(json.dumps(sr, indent=2))
+              PY
+
       - name: Run python-semantic-release (commit-based)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
