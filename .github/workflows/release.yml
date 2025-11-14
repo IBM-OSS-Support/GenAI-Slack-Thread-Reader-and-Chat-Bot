@@ -72,4 +72,4 @@ jobs:
       - name: Run python-semantic-release (commit-based, verbose)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: semantic-release -vv publish
+        run: semantic-release publish
