@@ -244,8 +244,13 @@ async def _fetch_history_paginated(
     progress_cb: Optional[Callable[[int, str], None]] = None,
     pct_start: int = 10,
     pct_end: int = 50,
+    oldest: Optional[float] = None,
+    latest: Optional[float] = None,
 ) -> List[dict]:
-    """Fetch all parent messages (exclude replies here)."""
+    """
+    Fetch all parent messages (exclude replies here) from a Slack channel,
+    optionally filtered by oldest/latest timestamps.
+    """
     parents, cursor, page_count, msg_count = [], None, 0, 0
     with timed("fetch_channel_history"):
         # We won’t know total pages up front; we’ll approximate using a soft cap
@@ -256,7 +261,9 @@ async def _fetch_history_paginated(
                 channel=channel_id,
                 limit=limit_per_page,
                 cursor=cursor,
-                include_all_metadata=True
+                include_all_metadata=True,
+                oldest=str(oldest) if oldest else None,
+                latest=str(latest) if latest else None
             )
             messages = resp.get("messages", []) or []
             page_msgs = 0
@@ -407,8 +414,12 @@ async def analyze_entire_channel_async(
     # optional progress/ticker callbacks (match thread progress API)
     progress_card_cb: Optional[Callable[[int, str], None]] = None,
     time_bump: Optional[Callable[[], None]] = None,
+    oldest: Optional[float] = None,
+    latest: Optional[float] = None
 ) -> str:
-
+    """
+    Analyze all messages in a Slack channel within an optional timeframe.
+    """
     def step(p: int, msg: str):
         if progress_card_cb:
             try:
@@ -425,7 +436,7 @@ async def analyze_entire_channel_async(
     client = AsyncWebClient(token=token)
     name_cache = UserNameCache()
 
-    # 1) Fetch parents (with progress 10→50)
+    # 1) Fetch parent messages (with optional timeframe)
     parents = await _fetch_history_paginated(
         client,
         channel_id,
@@ -433,6 +444,8 @@ async def analyze_entire_channel_async(
         progress_cb=progress_card_cb,
         pct_start=10,
         pct_end=50,
+        oldest=oldest,
+        latest=latest
     )
     if not parents:
         logger.warning(f"No messages found in <#{channel_id}>.")
@@ -488,6 +501,11 @@ async def analyze_entire_channel_async(
         reply_text_map: Dict[Tuple[str, int], str] = {
             k: reply_texts[i] for i, k in enumerate(reply_keys)
         } if reply_texts else {}
+
+        def _format_date_time_from_ts(ts: str) -> Tuple[str, str]:
+            from datetime import datetime
+            dt = datetime.fromtimestamp(float(ts))
+            return dt.strftime("%d %B %Y"), dt.strftime("%H:%M %Z")
 
         for p_idx, m in enumerate(parents):
             parent_ts = m["ts"]
@@ -612,6 +630,8 @@ def analyze_entire_channel(
     thread_ts: str,
     progress_card_cb: Optional[Callable[[int, str], None]] = None,
     time_bump: Optional[Callable[[], None]] = None,
+    oldest: Optional[float] = None,
+    latest: Optional[float] = None
 ) -> str:
     token = getattr(client, "token", None)
     if not token:
@@ -623,5 +643,7 @@ def analyze_entire_channel(
             thread_ts=thread_ts,
             progress_card_cb=progress_card_cb,
             time_bump=time_bump,
+            oldest=oldest,
+            latest=latest
         )
     )
