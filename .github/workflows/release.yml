@@ -20,6 +20,8 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           ref: dev
           fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: true
 
       - name: 🐍 Set up Python 3.10
         uses: actions/setup-python@v5
