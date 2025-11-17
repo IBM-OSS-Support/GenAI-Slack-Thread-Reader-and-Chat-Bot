@@ -14,6 +14,14 @@
 
 ---
 
+
+## ➕ v2.3.1 — Updated yml file
+📅 Nov 17  2025  
+
+### Highlights
+- Updated yml file
+
+---
 ## ➕ v2.3.0 — Timeframe Analysis & Homepage Updates
 📅 Nov 14  2025  
 
