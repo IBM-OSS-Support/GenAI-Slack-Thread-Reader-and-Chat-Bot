@@ -14,7 +14,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}  # or PAT_TOKEN if needed
+          ref: automate-test-branch
           fetch-depth: 0  # Needed to get full commit history
 
       - name: Set up Python (3.11)
@@ -46,10 +47,12 @@ jobs:
           git commit -m "chore: auto-bump to v${{ steps.bump.outputs.new_version }}"
 
       - name: Push changes
-        uses: ad-m/github-push-action@master
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          branch: automate-test-branch
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add version.txt release-note.md
+          git commit -m "chore: auto-bump to v${{ steps.bump.outputs.new_version }}" || echo "No changes to commit"
+          git push origin HEAD:automate-test-branch
 
       # - name: Create Release (Optional)
       #   uses: actions/create-release@v1
