@@ -15,6 +15,14 @@
 ---
 
 
+## ➕ v2.4.0 — Updated release and bump files
+📅 Nov 17  2025  
+
+### Highlights
+- Updated release and bump files
+
+---
+
 ## ➕ v2.3.2 — Added new function for updating timeline summary section
 📅 Nov 17  2025  
 
