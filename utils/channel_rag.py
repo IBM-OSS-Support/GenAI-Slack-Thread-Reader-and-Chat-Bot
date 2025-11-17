@@ -1,3 +1,6 @@
+# chains/analyze_channel.py
+from __future__ import annotations
+
 import os
 import re
 import time
@@ -5,7 +8,7 @@ import json
 import logging
 import asyncio
 from contextlib import contextmanager
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Callable
 
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -14,21 +17,26 @@ from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.web.client import WebClient  # only used if you later need sync utils
 
-from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
+# LangChain (chat/text-agnostic)
+from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import Runnable
 
+# LLM provider (supports GPT-OSS / ChatOllama / Ollama)
 from chains.llm_provider import get_llm
+from chains.llm_provider import is_chat_model
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Logging setup
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 logger = logging.getLogger("channel_analyzer")
 logger.setLevel(logging.INFO)
+# If you want file logging, uncomment below:
 # if not any(isinstance(h, logging.FileHandler) for h in logger.handlers):
-    # fh = logging.FileHandler("channel_analyzer.log", encoding="utf-8")
-    # fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-    # fh.setFormatter(fmt)
-    # logger.addHandler(fh)
+#     fh = logging.FileHandler("channel_analyzer.log", encoding="utf-8")
+#     fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+#     fh.setFormatter(fmt)
+#     logger.addHandler(fh)
 
 @contextmanager
 def timed(step_name: str, extra: dict | None = None):
@@ -42,9 +50,9 @@ def timed(step_name: str, extra: dict | None = None):
         else:
             logger.info(f"{step_name} completed in {elapsed:.3f}s")
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # Time helpers (IST)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 IST = ZoneInfo("Asia/Kolkata")
 
 def _format_date_time_from_ts(ts_str: str) -> Tuple[str, str]:
@@ -60,17 +68,21 @@ def _format_date_time_from_ts(ts_str: str) -> Tuple[str, str]:
     dt = datetime.fromtimestamp(ts, tz=IST)
     return dt.strftime("%d %B %Y"), dt.strftime("%H:%M %Z")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LLM (unchanged, still available if you want to call it later)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# LLM config (envs remain; actual selection done via get_llm/is_chat_model)
+# -----------------------------------------------------------------------------
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama-dev-unique.apps.epgui.cp.fyre.ibm.com")
 OLLAMA_MODEL_NAME = os.getenv("OLLAMA_MODEL_NAME", "granite3.3:8b")
 
-llm = get_llm()
-channel_prompt = PromptTemplate(
-    input_variables=["messages"],
-    template="""
-You are a Slack assistant summarizing an internal support or escalation thread. 
+# -----------------------------------------------------------------------------
+# Channel summary prompt (same content, split into SYSTEM/HUMAN for chat)
+# -----------------------------------------------------------------------------
+CHANNEL_SUMMARY_SYSTEM = (
+    "You are a Slack assistant summarizing an internal support or escalation thread."
+)
+
+# The HUMAN part embeds your original instructions verbatim (format kept the same).
+CHANNEL_SUMMARY_HUMAN = """
 Below is the full message history in JSON format, where each message and reply contains:
 - thread_id
 - user_name
@@ -122,12 +134,28 @@ Produce *exactly five sections*, in this order, using Slack markdown with *bold 
 *Do not* invent any bullets, sections, or timestamps. 
 If something isn’t in the thread, leave it out—do *not* guess.
 """
-)
-channel_summary_chain = LLMChain(llm=llm, prompt=channel_prompt)
 
-# ─────────────────────────────────────────────────────────────────────────────
+# Build chat and text prompt variants
+channel_chat_prompt = ChatPromptTemplate.from_messages(
+    [("system", CHANNEL_SUMMARY_SYSTEM), ("human", CHANNEL_SUMMARY_HUMAN)]
+)
+channel_text_prompt = PromptTemplate.from_template(
+    "SYSTEM:\n" + CHANNEL_SUMMARY_SYSTEM + "\n\nUSER:\n" + CHANNEL_SUMMARY_HUMAN
+)
+
+# Model + parser
+llm = get_llm()
+parser = StrOutputParser()
+
+# Choose chat vs text chain at runtime
+if is_chat_model(llm):
+    channel_summary_chain: Runnable = channel_chat_prompt | llm | parser
+else:
+    channel_summary_chain: Runnable = channel_text_prompt | llm | parser
+
+# -----------------------------------------------------------------------------
 # Async Slack helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 async def _call_with_retry(func, *args, **kwargs):
     while True:
         try:
@@ -184,7 +212,7 @@ class UserNameCache:
                 pass
 
         if not name:
-            name = user_or_bot_id  # last resort (won't happen often)
+            name = user_or_bot_id  # last resort
 
         async with self._lock:
             self._cache[user_or_bot_id] = name
@@ -211,18 +239,31 @@ class UserNameCache:
 async def _fetch_history_paginated(
     client: AsyncWebClient,
     channel_id: str,
-    limit_per_page: int = 200
+    limit_per_page: int = 200,
+    # optional progress reporting over a percentage segment
+    progress_cb: Optional[Callable[[int, str], None]] = None,
+    pct_start: int = 10,
+    pct_end: int = 50,
+    oldest: Optional[float] = None,
+    latest: Optional[float] = None,
 ) -> List[dict]:
-    """Fetch all parent messages (exclude replies here)."""
+    """
+    Fetch all parent messages (exclude replies here) from a Slack channel,
+    optionally filtered by oldest/latest timestamps.
+    """
     parents, cursor, page_count, msg_count = [], None, 0, 0
     with timed("fetch_channel_history"):
+        # We won’t know total pages up front; we’ll approximate using a soft cap
+        hard_cap = 8000  # used to scale progress updates
         while True:
             resp = await _call_with_retry(
                 client.conversations_history,
                 channel=channel_id,
                 limit=limit_per_page,
                 cursor=cursor,
-                include_all_metadata=True
+                include_all_metadata=True,
+                oldest=str(oldest) if oldest else None,
+                latest=str(latest) if latest else None
             )
             messages = resp.get("messages", []) or []
             page_msgs = 0
@@ -235,11 +276,21 @@ async def _fetch_history_paginated(
             msg_count += page_msgs
             page_count += 1
             logger.info(f"History page {page_count}: +{page_msgs} parents (cum {msg_count})")
+
+            # smooth progress within [pct_start, pct_end]
+            if progress_cb:
+                span = max(0, pct_end - pct_start)
+                pct = pct_start + min(span, int((msg_count / hard_cap) * span))
+                progress_cb(pct, f"Scanning channel history… ({msg_count} messages)")
+
             cursor = (resp.get("response_metadata") or {}).get("next_cursor")
             if not cursor:
                 break
 
     parents.sort(key=lambda m: float(m["ts"]))
+    # ensure we land on pct_end when history is done
+    if progress_cb:
+        progress_cb(pct_end, f"History scanned. ({len(parents)} parent messages)")
     return parents
 
 async def _fetch_replies_for_parent(
@@ -292,49 +343,130 @@ async def _fetch_all_replies_concurrent(
 
     replies_map: Dict[str, List[dict]] = {ts: replies for ts, replies in pairs}
     total_replies = sum(len(v) for v in replies_map.values())
-    logger.info(f"Collected replies: {total_replies} across {len([p for p in parents if int(p.get('reply_count',0) or 0)>0])} parents")
+    logger.info(
+        f"Collected replies: {total_replies} across "
+        f"{len([p for p in parents if int(p.get('reply_count',0) or 0)>0])} parents"
+    )
     return replies_map
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# Retry-on-empty mechanics (aligned with analyze_thread)
+# -----------------------------------------------------------------------------
+from tenacity import retry, wait_random_exponential, stop_after_attempt, retry_if_exception_type
+
+class EmptyLLMOutput(RuntimeError):
+    pass
+
+def _trim_messages_blob(s: str, max_chars: int = 6000) -> str:
+    """Keep the tail of the JSON string (often where newest content is)."""
+    if not isinstance(s, str):
+        return s
+    if len(s) <= max_chars:
+        return s
+    tail = s[-max_chars:]
+    nl = tail.find("\n")
+    return tail[nl+1:] if nl != -1 else tail
+
+@retry(
+    wait=wait_random_exponential(min=0.7, max=2.5),
+    stop=stop_after_attempt(3),
+    retry=retry_if_exception_type(EmptyLLMOutput),
+)
+def _invoke_chain(chain: Runnable, /, **inputs) -> str:
+    """
+    Invoke the chain; if the model returns an empty string, raise to trigger a retry.
+    On the 2nd attempt we trim the messages blob (to dodge ctx/decoding edge cases).
+    """
+    attempt = getattr(_invoke_chain, "_attempt", 1)
+
+    # 1) First try with original inputs
+    out = chain.invoke(inputs)
+    text = (out or "").strip()
+    if text:
+        _invoke_chain._attempt = 1  # reset
+        return text
+
+    # 2) Empty → try again with a trimmed blob (only once per call stack)
+    msg_key = "messages" if "messages" in inputs else ("text" if "text" in inputs else None)
+    if msg_key and attempt == 1 and isinstance(inputs[msg_key], str):
+        logger.warning("LLM returned empty output; retrying with trimmed JSON messages blob.")
+        trimmed = _trim_messages_blob(inputs[msg_key], max_chars=6000)
+        new_inputs = dict(inputs)
+        new_inputs[msg_key] = trimmed
+        _invoke_chain._attempt = 2
+        out2 = chain.invoke(new_inputs)
+        text2 = (out2 or "").strip()
+        if text2:
+            _invoke_chain._attempt = 1
+            return text2
+
+    # 3) Still empty → raise to trigger tenacity retry
+    _invoke_chain._attempt = attempt + 1
+    raise EmptyLLMOutput("Model returned empty output")
+
+# -----------------------------------------------------------------------------
 # Public async API
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 async def analyze_entire_channel_async(
     token: str,
     channel_id: str,
-    thread_ts: str  # API parity; not used in full-channel mode
+    thread_ts: str,  # API parity; not used in full-channel mode
+    # optional progress/ticker callbacks (match thread progress API)
+    progress_card_cb: Optional[Callable[[int, str], None]] = None,
+    time_bump: Optional[Callable[[], None]] = None,
+    oldest: Optional[float] = None,
+    latest: Optional[float] = None
 ) -> str:
     """
-    1) Fetch parents & replies (strict order)
-    2) For each message/reply, convert <@U…> to @Display Name
-    3) Build **minimal JSON** with: thread_id, user_name, text, posted_date, posted_time (+ replies[])
-       - posted_date format: 'DD Month 2025' (e.g., '13 August 2025')
-       - posted_time format: 'HH:MM IST'
-    4) Persist the full JSON file (no skipping)
-    5) (Optional) Run LLM if you still want a summary
+    Analyze all messages in a Slack channel within an optional timeframe.
     """
+    def step(p: int, msg: str):
+        if progress_card_cb:
+            try:
+                progress_card_cb(max(0, min(100, int(p))), msg)
+            except Exception:
+                pass
+
     total_start = time.perf_counter()
     logger.info(f"Starting analyze_entire_channel(async) | channel_id={channel_id} thread_ts={thread_ts}")
+
+    # 0) Start
+    step(5, "Preparing channel analysis…")
 
     client = AsyncWebClient(token=token)
     name_cache = UserNameCache()
 
-    # 1) Fetch
-    parents = await _fetch_history_paginated(client, channel_id)
+    # 1) Fetch parent messages (with optional timeframe)
+    parents = await _fetch_history_paginated(
+        client,
+        channel_id,
+        limit_per_page=200,
+        progress_cb=progress_card_cb,
+        pct_start=10,
+        pct_end=50,
+        oldest=oldest,
+        latest=latest
+    )
     if not parents:
         logger.warning(f"No messages found in <#{channel_id}>.")
-        # still persist an empty JSON for traceability
-        # await _persist_min_json([], channel_id)
+        step(100, "No messages found.")
         return f":warning: No messages found in <#{channel_id}>."
 
+    # 2) Fetch replies concurrently
+    step(55, "Collecting thread replies…")
     replies_map = await _fetch_all_replies_concurrent(client, channel_id, parents, max_concurrency=12)
 
-    # 2) Resolve speaker names + inline mentions concurrently and build minimal JSON
+    # 3) Resolve names + mentions; build minimal JSON
+    step(62, "Compiling content…")
     with timed("build_minimal_json", extra={
         "parents": len(parents),
         "total_replies": sum(len(v) for v in replies_map.values())
     }):
         # Parent speaker names
-        parent_name_tasks = [name_cache.get_name(client, (m.get("user") or m.get("bot_id") or "<unknown>")) for m in parents]
+        parent_name_tasks = [
+            name_cache.get_name(client, (m.get("user") or m.get("bot_id") or "<unknown>"))
+            for m in parents
+        ]
         parent_names = await asyncio.gather(*parent_name_tasks)
 
         # Parent text mention normalization
@@ -351,36 +483,48 @@ async def analyze_entire_channel_async(
             replies = replies_map.get(pts, [])
             for idx, r in enumerate(replies):
                 reply_keys.append((pts, idx))
-                reply_name_tasks.append(name_cache.get_name(client, (r.get("user") or r.get("bot_id") or "<unknown>")))
-                reply_text_tasks.append(name_cache.replace_mentions(client, r.get("text", "") or ""))
+                reply_name_tasks.append(
+                    name_cache.get_name(client, (r.get("user") or r.get("bot_id") or "<unknown>"))
+                )
+                reply_text_tasks.append(
+                    name_cache.replace_mentions(client, r.get("text", "") or "")
+                )
 
         reply_names = await asyncio.gather(*reply_name_tasks) if reply_name_tasks else []
         reply_texts = await asyncio.gather(*reply_text_tasks) if reply_text_tasks else []
 
         # Re-assemble into ordered minimal JSON
         minimal: List[Dict[str, object]] = []
-        reply_name_map: Dict[Tuple[str, int], str] = {k: reply_names[i] for i, k in enumerate(reply_keys)} if reply_names else {}
-        reply_text_map: Dict[Tuple[str, int], str] = {k: reply_texts[i] for i, k in enumerate(reply_keys)} if reply_texts else {}
+        reply_name_map: Dict[Tuple[str, int], str] = {
+            k: reply_names[i] for i, k in enumerate(reply_keys)
+        } if reply_names else {}
+        reply_text_map: Dict[Tuple[str, int], str] = {
+            k: reply_texts[i] for i, k in enumerate(reply_keys)
+        } if reply_texts else {}
+
+        def _format_date_time_from_ts(ts: str) -> Tuple[str, str]:
+            from datetime import datetime
+            dt = datetime.fromtimestamp(float(ts))
+            return dt.strftime("%d %B %Y"), dt.strftime("%H:%M %Z")
 
         for p_idx, m in enumerate(parents):
             parent_ts = m["ts"]
             posted_date, posted_time = _format_date_time_from_ts(parent_ts)
 
-            rec = {
+            rec: Dict[str, object] = {
                 "thread_id": parent_ts,
                 "user_name": parent_names[p_idx],
                 "text": parent_texts[p_idx],
-                "posted_date": posted_date,  # 'DD Month 2025' in IST
-                "posted_time": posted_time,  # 'HH:MM IST'
+                "posted_date": posted_date,   # 'DD Month 2025'
+                "posted_time": posted_time,   # 'HH:MM IST'
             }
 
             rs: List[Dict[str, str]] = []
             for r_idx, r in enumerate(replies_map.get(parent_ts, [])):
-                # Use each reply's own ts for its posted_date/time
                 r_ts = r.get("ts") or parent_ts
                 r_date, r_time = _format_date_time_from_ts(r_ts)
                 rs.append({
-                    "thread_id": parent_ts,  # the parent thread id
+                    "thread_id": parent_ts,  # parent thread id
                     "user_name": reply_name_map.get((parent_ts, r_idx)) or (r.get("user") or r.get("bot_id") or "<unknown>"),
                     "text": reply_text_map.get((parent_ts, r_idx)) or (r.get("text", "") or ""),
                     "posted_date": r_date,
@@ -390,26 +534,41 @@ async def analyze_entire_channel_async(
                 rec["replies"] = rs
             minimal.append(rec)
 
-    # 3) Persist compact JSON file (entire file, nothing skipped)
-    # json_path = await _persist_min_json(minimal, channel_id)
-    # logger.info(f"Minimal JSON persisted at: {json_path}")
+    # 4) Prepare JSON string for LLM (prompt explicitly asks for JSON input)
+    with timed("prepare_llm_json"):
+        json_input = json.dumps(minimal, ensure_ascii=False)
 
-    # 4/5) Optional: build a transcript and run LLM (kept for parity; remove if not needed)
-    with timed("prepare_llm_transcript"):
-        blocks: List[str] = []
-        for rec in minimal:
-            header = f"*{rec['user_name']}* ({rec['thread_id']}):"
-            parts = [f"{header} {rec['text']}"]
-            for r in rec.get("replies", []):
-                parts.append(f"*{r['user_name']}* ({r['thread_id']}): {r['text']}")
-            blocks.append("\n".join(parts))
-        raw_all = "\n\n---\n\n".join(blocks)
+    # 5) Run model with a gentle ticker for perceived progress
+    step(70, "Running analysis…")
+    start = time.time()
+
+    def _ticker():
+        # raise perceived progress while LLM is thinking
+        while True:
+            if time_bump:
+                try:
+                    time_bump()
+                except Exception:
+                    pass
+            # stop nudging after ~12s
+            if time.time() - start > 12:
+                break
+            time.sleep(0.5)
+
+    t = None
+    if time_bump:
+        import threading
+        t = threading.Thread(target=_ticker, daemon=True)
+        t.start()
 
     with timed("llm_summary"):
         try:
-            result = await asyncio.to_thread(channel_summary_chain.run, messages=raw_all)
+            # Use retrying invoke (aligned with analyze_thread)
+            result = await asyncio.to_thread(_invoke_chain, channel_summary_chain, messages=json_input)
+            step(100, "Completed.")
         except Exception as e:
             logger.error(f"Failed to summarize channel <#{channel_id}>: {e}")
+            step(100, "Failed during model call.")
             result = f"❌ Failed to summarize channel <#{channel_id}>: {e}"
 
     total_elapsed = time.perf_counter() - total_start
@@ -420,9 +579,9 @@ async def analyze_entire_channel_async(
     )
     return result
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Persistence helper
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# Persistence helper (unchanged; optional if you re-enable persistence)
+# -----------------------------------------------------------------------------
 async def _persist_min_json(min_records: List[Dict[str, object]], channel_id: str) -> str:
     """Persist minimal JSON to disk with fallback to /tmp if needed."""
     def _write(records: List[Dict[str, object]]) -> str:
@@ -462,15 +621,29 @@ async def _persist_min_json(min_records: List[Dict[str, object]], channel_id: st
 
     return await asyncio.to_thread(_write, min_records)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Sync wrapper (if your callers pass a sync WebClient)
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# Sync wrapper (backward-compatible; optional callbacks supported)
+# -----------------------------------------------------------------------------
 def analyze_entire_channel(
-    client,
+    client: WebClient,
     channel_id: str,
-    thread_ts: str
+    thread_ts: str,
+    progress_card_cb: Optional[Callable[[int, str], None]] = None,
+    time_bump: Optional[Callable[[], None]] = None,
+    oldest: Optional[float] = None,
+    latest: Optional[float] = None
 ) -> str:
     token = getattr(client, "token", None)
     if not token:
         raise ValueError("WebClient missing token")
-    return asyncio.run(analyze_entire_channel_async(token, channel_id, thread_ts))
+    return asyncio.run(
+        analyze_entire_channel_async(
+            token=token,
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            progress_card_cb=progress_card_cb,
+            time_bump=time_bump,
+            oldest=oldest,
+            latest=latest
+        )
+    )

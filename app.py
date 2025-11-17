@@ -1,5 +1,7 @@
 from dotenv import load_dotenv
 
+from utils.progress_bar import ProgressBar
+from utils.progress_card import ProgressCard
 from utils.resolve_user_mentions import resolve_user_mentions
 load_dotenv()
 from utils.global_kb import index_startup_files, query_global_kb
@@ -37,6 +39,12 @@ from chains.analyze_thread import translation_chain
 from utils.health import health_app, run_health_server
 from utils.innovation_report import parse_innovation_sheet
 logging.basicConfig(level=logging.DEBUG)
+from utils.usage_guide import get_usage_guide
+from chains.analyze_thread import analyze_slack_thread, custom_chain, THREAD_ANALYSIS_BLOBS  # NEW
+from slack_sdk.models.blocks import SectionBlock, ActionsBlock, ButtonElement
+from datetime import datetime, timezone, timedelta
+
+
 
 
 # Instantiate a single global vector store
@@ -54,6 +62,10 @@ TEAM_BOT_TOKENS = {
 formatted = os.getenv("FORMATTED_CHANNELS", "")
 FORMATTED_CHANNELS = {ch.strip() for ch in formatted.split(",") if ch.strip()}
 logging.info(f"Formatted channels: {FORMATTED_CHANNELS}")
+
+# Prevent the spinner → warning when user picks a channel from home-tab dropdown
+USER_SELECTED_CHANNELS: dict[str, str] = {}  # optional in-memory cache (user_id -> channel_id)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Multi‑workspace router with automatic fallback
 # ─────────────────────────────────────────────────────────────────────────────
@@ -262,34 +274,49 @@ def handle_language_selection(ack, body, logger):
 
 @app.action("translate_button")
 def handle_translate_click(ack, body, client, logger):
-    # 1) Ack
+    # Ack immediately so Bolt doesn't complain about timeouts
     ack()
+    try:
+        # 1) Language choice
+        state_vals = body.get("state", {}).get("values", {}).get("translate_controls", {})
+        lang = (
+            state_vals.get("select_language", {})
+            .get("selected_option", {})
+            .get("value", "en")
+        )
 
-    # 2) Language choice
-    state_vals = body["state"]["values"]["translate_controls"]
-    lang = state_vals["select_language"]["selected_option"]["value"]
+        # 2) Reconstruct the original markdown text robustly
+        orig_blocks = body.get("message", {}).get("blocks", []) or []
+        sections = []
+        for blk in orig_blocks:
+            if blk.get("type") == "section":
+                text_obj = blk.get("text") or {}
+                if text_obj.get("type") == "mrkdwn" and "text" in text_obj:
+                    sections.append(text_obj["text"])
+        original_text = "\n".join(sections).strip()
 
-    # 3) Reconstruct original markdown text
-    orig_blocks = body["message"]["blocks"]
-    original_text = "\n".join(
-        blk["text"]["text"]
-        for blk in orig_blocks
-        if blk.get("type") == "section"
-           and isinstance(blk.get("text"), dict)
-           and blk["text"].get("type") == "mrkdwn"
-    )
+        # 3) Translate via LangChain Runnable (use invoke, not run)
+        # If you prefer your retry/trim logic, call: _invoke_chain(translation_chain, text=original_text, language=lang)
+        translated = (translation_chain.invoke({"text": original_text, "language": lang}) or "").strip()
+        translated = translated.replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
 
-    # 4) Translate via LLMChain
-    translated = translation_chain.run(text=original_text, language=lang).replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
+        # 4) Post the translation
+        send_message(
+            client,
+            body["channel"]["id"],
+            f":earth_asia: *Translation ({lang}):*\n{translated}",
+            thread_ts=body["message"]["ts"],
+            user_id=None,
+            export_pdf=False,
+        )
+    except Exception:
+        logger.exception("Translation failed")
+        client.chat_postMessage(
+            channel=body.get("channel", {}).get("id"),
+            thread_ts=body.get("message", {}).get("ts"),
+            text="❌ Sorry, translation failed."
+        )
 
-    send_message(
-        client,
-        body["channel"]["id"],
-        f":earth_asia: *Translation ({lang}):*\n{translated}",
-        body["message"]["ts"],
-        None,
-        False,  # NEW: allow PDF export of translations
-    )
 def load_stats():
     try:
         with open(STATS_FILE) as f:
@@ -534,6 +561,196 @@ def get_bot_stats():
         f"👍 *{_vote_up_count}*   👎 *{_vote_down_count}*"
     )
 
+# --------------------------
+# Open the first modal
+# --------------------------
+def open_date_time_dialog(client, trigger_id, channel_id, channel_name, origin_channel, thread_ts, user_id, team_id):
+    view = {
+        "type": "modal",
+        "callback_id": "channel_analysis_date_picker",
+        "title": {"type": "plain_text", "text": "Channel Analysis"},
+        "close": {"type": "plain_text", "text": "Cancel"},  # no submit button
+        "private_metadata": json.dumps({
+            "channel_id": channel_id,
+            "channel_name": channel_name,
+            "origin_channel": origin_channel,
+            "thread_ts": thread_ts,
+            "user_id": user_id,
+            "team_id": team_id
+        }),
+        "blocks": [
+            {"type": "section", "text": {"type": "mrkdwn", "text": "Select a timeframe:"}},
+            {
+                "type": "actions",
+                "block_id": "range_selector_block",
+                "elements": [
+                    {"type": "button", "text": {"type": "plain_text", "text": "Last 1 day"}, "value": "1d", "action_id": "select_1d"},
+                    {"type": "button", "text": {"type": "plain_text", "text": "Last 1 week"}, "value": "1w", "action_id": "select_1w"},
+                    {"type": "button", "text": {"type": "plain_text", "text": "Last 1 month"}, "value": "1m", "action_id": "select_1m"},
+                    {"type": "button", "text": {"type": "plain_text", "text": "Last 1 year"}, "value": "1y", "action_id": "select_1y"},
+                    {"type": "button", "text": {"type": "plain_text", "text": "Entire channel"}, "value": "all", "action_id": "select_all"},
+                    {"type": "button", "text": {"type": "plain_text", "text": "Custom range"}, "value": "1w", "action_id": "select_custom"},
+                ]
+            }
+        ]
+    }
+
+    client.views_open(trigger_id=trigger_id, view=view)
+
+def get_creation_timestamp(meta):
+    """Fetch the channel creation timestamp (in seconds)."""
+    try:
+        target_client = get_client_for_team(meta["team_id"])
+        ch_info = target_client.conversations_info(channel=meta["channel_id"])["channel"]
+        created_ts = ch_info.get("created")
+        return int(created_ts) if created_ts else None
+    except Exception as e:
+        logging.getLogger().warning(f"Failed to get creation timestamp for channel {meta.get('channel_id')}: {e}")
+        return None
+
+def get_time_range(value, meta):
+    """Return (oldest_ts, latest_ts) for given range value."""
+    now = datetime.now(timezone.utc)
+    latest_ts = int(now.timestamp())
+
+    # Determine oldest timestamp
+    oldest_ts_map = {
+        "1d": int((now - timedelta(days=1)).timestamp()),
+        "1w": int((now - timedelta(weeks=1)).timestamp()),
+        "1m": int((now - timedelta(days=30)).timestamp()),
+        "1y": int((now - timedelta(days=365)).timestamp()),
+        "all": get_creation_timestamp(meta),  # Channel creation time
+    }
+
+    oldest_ts = oldest_ts_map.get(value)
+    # fallback: if "all" fails to get creation timestamp, default to 1 year
+    if oldest_ts is None:
+        oldest_ts = int((now - timedelta(days=365)).timestamp())
+
+    return oldest_ts, latest_ts
+
+# --------------------------
+# Handle preset ranges immediately
+# --------------------------
+PRESET_ACTIONS = ["select_1d", "select_1w", "select_1m", "select_1y", "select_all", "select_custom"]
+
+for action_id in PRESET_ACTIONS:
+    @app.action(action_id)
+    def handle_preset_buttons(ack, body, client, logger):
+        ack(response_action="clear")  # acknowledge immediately
+
+        view_id = body["view"]["id"]
+        view_hash = body["view"]["hash"]
+        action = body["actions"][0]
+        value = action["value"]
+
+        # Safely read private metadata
+        meta = json.loads(body.get("view", {}).get("private_metadata", "{}"))
+
+        # Compute timestamps for the selected preset
+        oldest_ts, latest_ts = get_time_range(value,meta)
+
+        view = {
+            "type": "modal",
+            "callback_id": "custom_date_picker_modal",
+            "title": {"type": "plain_text", "text": "Select Custom Date Range"},
+            "submit": {"type": "plain_text", "text": "Run"},
+            "close": {"type": "plain_text", "text": "Cancel"},
+            "private_metadata": json.dumps(meta),
+            "blocks": [
+                {
+                    "type": "input",
+                    "block_id": "oldest_block",
+                    "label": {"type": "plain_text", "text": "Start Date & Time (UTC)"},
+                    "element": {"type": "datetimepicker", "action_id": "oldest", "initial_date_time": oldest_ts}
+                },
+                {
+                    "type": "input",
+                    "block_id": "latest_block",
+                    "label": {"type": "plain_text", "text": "End Date & Time (UTC)"},
+                    "element": {"type": "datetimepicker", "action_id": "latest", "initial_date_time": latest_ts}
+                }
+            ]
+        }
+
+        client.views_update(
+            view_id=view_id,
+            hash=view_hash,
+            view=view
+        )
+
+# --------------------------
+# Handle date submission
+# --------------------------
+@app.view("custom_date_picker_modal")
+def handle_custom_date_submission(ack, body, client, logger):
+    ack()  # always ack first
+
+    try:
+        values = body["view"]["state"]["values"]
+        meta = json.loads(body["view"].get("private_metadata", "{}"))
+
+        oldest_ts = values["oldest_block"]["oldest"]["selected_date_time"]
+        latest_ts = values["latest_block"]["latest"]["selected_date_time"]
+
+        oldest_str = datetime.fromtimestamp(oldest_ts).strftime("%b %-d, %Y (%-I:%M %p)")
+        latest_str = datetime.fromtimestamp(latest_ts).strftime("%b %-d, %Y (%-I:%M %p)")
+
+        channel_id = meta["channel_id"]
+        target_team_id = meta["team_id"]
+
+        target_client = get_client_for_team(target_team_id)
+
+        try:
+            ch_info = target_client.conversations_info(channel=channel_id)["channel"]
+            channel_name = ch_info.get("name") or ch_info.get("name_normalized") or channel_id
+        except Exception as e:
+            logger = logging.getLogger()
+            logger.debug(f"Failed to fetch channel info for {channel_id} in {target_team_id}: {e}")
+            channel_name = channel_id
+        
+        try:
+            auth_resp = target_client.auth_test()
+            team_name = auth_resp.get("team") or auth_resp.get("url", "").split("//")[-1].split(".")[0] or target_team_id
+        except Exception as e:
+            logger = logging.getLogger()
+            logger.debug(f"auth_test failed for team ({team_name}) {target_team_id}: {e}")
+            team_name = target_team_id
+
+        # NEW: Progress card for channel analysis (post progress to the user's DM 'ch')
+        card = ProgressCard(
+            client=target_client,
+            channel=meta["origin_channel"],
+            thread_ts=meta["thread_ts"],
+            title=f"Analyzing Channel #{channel_name} [{oldest_str} to {latest_str}]"  # #{raw} for channel Id
+        )
+
+        card.start("Fetching channel messages…")
+        summary = analyze_entire_channel(
+            target_client,
+            meta["channel_id"],
+            meta["thread_ts"],
+            oldest=oldest_ts,
+            latest=latest_ts,
+            progress_card_cb=lambda pct, note: card.set(pct, note)
+        )
+        summary = summary.replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
+        card.finish(ok=True, note="Completed.")
+        
+        send_message(target_client, meta["origin_channel"], summary, thread_ts=meta["thread_ts"], user_id=meta["user_id"], export_pdf=True)
+        _get_memory(meta["thread_ts"]).save_context(
+            {"human_input": f"ANALYZE #{channel_id} (team {target_team_id})"},
+            {"output": summary}
+        )
+
+    except Exception as e:
+        logger.exception(f"Error handling custom date submission: {e}")
+        client.chat_postMessage(
+            channel=meta.get("origin_channel", meta.get("user_id")),
+            text=f"❌ Failed to analyze channel: `{e}`",
+            thread_ts=meta.get("thread_ts")
+        )
+
 def process_conversation(client: WebClient, event, text: str):
     ch      = event["channel"]
     ts      = event["ts"]
@@ -547,6 +764,7 @@ def process_conversation(client: WebClient, event, text: str):
         _memories.pop(thread, None)
         _last_activity.pop(thread, None)
         _active_sessions.pop(thread, None)
+        THREAD_ANALYSIS_BLOBS.pop(thread, None)  # NEW: drop saved blob on expiry
         send_message(
             client, ch,
             f"⚠️ Conversation expired ({mins}m). Start a new one.",
@@ -612,7 +830,36 @@ def process_conversation(client: WebClient, event, text: str):
         return
 
     logging.debug("🔔 Processing: %s", resolve_user_mentions(client, cleaned).strip())
+    if is_followup and (thread in ANALYSIS_THREADS) and THREAD_ANALYSIS_BLOBS.get(thread):
+        try:
+            focused = custom_chain.invoke({
+                "messages": THREAD_ANALYSIS_BLOBS[thread],
+                "instructions": normalized
+            }).strip()
+        except Exception:
+            # graceful fallback
+            focused = process_message_mcp(normalized, thread)
 
+        USAGE_STATS["analyze_followups"] += 1
+        save_stats()
+        send_message(client, ch, focused, thread_ts=thread, user_id=uid)
+        return
+
+    # Follow-up analysis in threads
+    if is_followup and (thread in ANALYSIS_THREADS) and THREAD_ANALYSIS_BLOBS.get(thread):
+        try:
+            focused = custom_chain.invoke({
+                "messages": THREAD_ANALYSIS_BLOBS[thread],
+                "instructions": normalized
+            }).strip()
+        except Exception:
+            # graceful fallback
+            focused = process_message_mcp(normalized, thread)
+
+        USAGE_STATS["analyze_followups"] += 1
+        save_stats()
+        send_message(client, ch, focused, thread_ts=thread, user_id=uid)
+        return
     
     # Help command
     if resolve_user_mentions(client, cleaned).strip() == "" and not event.get("files"):
@@ -637,6 +884,18 @@ def process_conversation(client: WebClient, event, text: str):
         return
 
     USAGE_STATS["total_calls"] += 1
+
+    # Usage guide command
+    normalized_text = resolve_user_mentions(client, cleaned).strip().lower()
+    if normalized_text in ("usage", "help"):
+        send_message(
+            client,
+            ch,
+            get_usage_guide(),
+            thread_ts=thread,
+            user_id=uid
+        )
+        return                                                                                 
 
     # Thread analysis
     m_ch = re.match(
@@ -665,23 +924,40 @@ def process_conversation(client: WebClient, event, text: str):
         # Run analysis using the correct workspace client
         try:
             target_client = get_client_for_team(target_team_id)
-            summary = analyze_entire_channel(target_client, channel_id, thread)\
-                .replace("[DD/MM/YYYY HH:MM UTC]", "")\
-                .replace("*@username*", "")\
-                .strip()
-            summary = git_md_to_slack_md(summary)
-            send_message(
-                get_client_for_team(target_team_id),  # send from that workspace
-                ch if ch.startswith("D") else ch,     # DM channel OK; if public, original ch
-                summary,
-                thread_ts=thread,
-                user_id=uid,
-                export_pdf=True
+            try:
+                ch_info = target_client.conversations_info(channel=channel_id)["channel"]
+                channel_name = ch_info.get("name") or ch_info.get("name_normalized") or channel_id
+            except Exception as e:
+                logger = logging.getLogger()
+                logger.debug(f"Failed to fetch channel info for {channel_id} in {target_team_id}: {e}")
+                channel_name = channel_id
+
+            client.chat_postMessage(
+            channel=ch,
+            text=f"Click below to analyze #{raw} with custom dates:",
+            blocks=[
+                SectionBlock(text=f"Analyze #{channel_name}").to_dict(),
+                ActionsBlock(
+                    elements=[
+                        ButtonElement(
+                            text="Select Dates & Analyze",
+                            action_id="analyze_channel_button",
+                            value=json.dumps({
+                                "channel_id": channel_id,
+                                "channel_name": channel_name,
+                                "origin_channel": ch,
+                                "thread_ts": thread,
+                                "team_id": target_team_id,
+                                "user_id": uid
+                            })
+                        ).to_dict()
+                    ]
+                ).to_dict()
+            ],
+            thread_ts=thread
             )
-            _get_memory(thread).save_context(
-                {"human_input": f"ANALYZE #{channel_id} (team {target_team_id})"},
-                {"output": summary}
-            )
+            return
+
         except Exception as e:
             send_message(
                 client, ch,
@@ -694,6 +970,7 @@ def process_conversation(client: WebClient, event, text: str):
                 ),
                 thread_ts=thread, user_id=uid
             )
+
         return
 
     m = re.search(r"https://[^/]+/archives/([^/]+)/p(\d+)", normalized, re.IGNORECASE)
@@ -705,40 +982,66 @@ def process_conversation(client: WebClient, event, text: str):
         else:
             USAGE_STATS["analyze_followups"] += 1
         save_stats()
+
         cid    = m.group(1)
         raw    = m.group(2)
         ts10   = raw[:10] + "." + raw[10:]
         cmd    = normalized.replace(m.group(0), "").strip().lower()
-        logging.debug(
-            "🔗 Analyzing thread %s in channel %s with command '%s'",ts10,cid,cmd)
 
         try:
+        # Use only the model card (Block Kit)
             export_pdf = False
+            card = ProgressCard(client, ch, thread, title="Thread analysis")
+            card.start("Fetching Slack messages…")
 
-            def _run(c: WebClient):
-                # choose default vs formatted based on your toggle
+            def _run_with_progress(c: WebClient):
                 if cid in FORMATTED_CHANNELS:
-                    return analyze_slack_thread(c, cid, ts10, instructions=cmd, default=False)
-                return analyze_slack_thread(c, cid, ts10, instructions=cmd, default=True)
+                    return analyze_slack_thread(
+                        c, cid, ts10,
+                        instructions=cmd,
+                        default= True,
+                        progress_card_cb=lambda pct, note: card.set(pct, note),
+                        time_bump=lambda: card.maybe_time_bumps(),
+                    )
+                return analyze_slack_thread(
+                        c, cid, ts10,
+                        instructions=cmd,
+                        default=False,
+                        progress_card_cb=lambda pct, note: card.set(pct, note),
+                        time_bump=lambda: card.maybe_time_bumps(),
+                    )
 
-            # Try primary team first, then the other workspace(s)
             detected_team = detect_real_team_from_event(None, event)
-            target_team_id, summary = ROUTER.try_call(detected_team, _run)
+            target_team_id, summary = ROUTER.try_call(detected_team, _run_with_progress)
 
             summary = summary.replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
+            card.finish(ok=True)
+
             send_message(
                 get_client_for_team(target_team_id),
-                ch,  # reply in the same DM/thread the user is in
+                ch,
                 summary,
                 thread_ts=thread,
                 user_id=uid,
                 export_pdf=(cid in FORMATTED_CHANNELS)
+            )
+            send_message(
+                get_client_for_team(target_team_id),
+                ch,
+                "💬 Want a deeper dive? Reply in *this thread* with your question "
+                "(e.g., *explain the timeline*, *why did we escalate*, *expand Business Impact*).",
+                thread_ts=thread,
+                user_id=uid
             )
             _get_memory(thread).save_context(
                 {"human_input": f"{cmd.upper() or 'ANALYZE'} {ts10} (team {target_team_id})"},
                 {"output": summary}
             )
         except Exception as e:
+            try:
+                card.finish(ok=False, note="Failed.")
+            except Exception:
+                pass
             send_message(
                 client, ch,
                 f"❌ Could not process thread in either workspace: {e}",
@@ -1017,56 +1320,512 @@ def handle_app_mention(body, event, say, client, logger):
     # Otherwise, normal conversation
     process_conversation(client, event, event.get("text", "").strip())
 
-def do_analysis(body,event: dict, client: WebClient):
-    real_team = detect_real_team_from_event(body, event)
+def do_analysis(body, event: dict, client: WebClient):
+    """
+    Unified entry point to trigger analysis from buttons/modals.
+    Assumes `client` is already team/workspace-aware.
+    """
+    try:
+        text = event.get("text", "").strip()
+        if not text:
+            return
 
-    process_conversation(client, event, event["text"])
-    # 2) rebind your client
-    client = get_client_for_team(real_team)
-    # If a file is attached during the mention, treat it as file_share
-    if event.get("files"):
-        return handle_file_share(event, client)
-    # Otherwise, normal conversation
-    process_conversation(client, event, event.get("text", "").strip())
+        # If files are attached, treat as file upload
+        if event.get("files"):
+            # Note: handle_file_share expects 'body', so pass it if available
+            return handle_file_share(body or {}, event, client, logging.getLogger())
+
+        # Otherwise, process as normal conversation/analysis
+        process_conversation(client, event, text)
+
+    except Exception as e:
+        logger = logging.getLogger()
+        logger.error(f"Error in do_analysis: {e}")
+        # Try to notify user if possible
+        user_id = event.get("user")
+        if user_id:
+            try:
+                client.chat_postMessage(
+                    channel=user_id,
+                    text=":x: Something went wrong while processing your request."
+                )
+            except:
+                pass
+
+# def do_analysis(body,event: dict, client: WebClient):
+#     real_team = detect_real_team_from_event(body, event)
+
+#     process_conversation(client, event, event["text"])
+#     # 2) rebind your client
+#     client = get_client_for_team(real_team)
+#     # If a file is attached during the mention, treat it as file_share
+#     if event.get("files"):
+#         return handle_file_share(event, client)
+#     # Otherwise, normal conversation
+#     process_conversation(client, event, event.get("text", "").strip())
 
 
+@app.event("app_home_opened")
+def update_home_tab(client, event, logger):
+    user_id = event["user"]
+    try:
+        client.views_publish(
+            user_id=user_id,
+            view={
+                "type": "home",
+                "callback_id": "home_view",
+                "blocks": [
+                    # Logo
+                    # {
+                    #     "type": "image", 
+                    #     "image_url": "https://raw.githubusercontent.com/IBM-OSS-Support/GenAI-Slack-Thread-Reader-and-Chat-Bot/1794440cf5e935e5e0c2ac8bf76cb7c81a03f77e/utils/assets/images/ask-support-bot-icon-100x100_white.png", 
+                    #     "alt_text": "Ask-Support-Bot-Logo"
+                    # },
+                    
+                    # Header
+                    {
+                        "type": "header", 
+                        "text": 
+                        {
+                            "type": "plain_text", 
+                            "text": "Ask-Support-Bot", 
+                            "emoji": True
+                        }
+                    },
+                    # Version
+                    {
+                        "type": "context",
+                        "elements": [
+                            {
+                                "type": "mrkdwn",
+                                "text": "<https://github.com/IBM-OSS-Support/GenAI-Slack-Thread-Reader-and-Chat-Bot/blob/1794440cf5e935e5e0c2ac8bf76cb7c81a03f77e/Release-note.md|_v2.2.0_ > \n\n"
+                            }
+                        ]
+                    },
+                    # Welcome section
+                    {
+                        "type": "section", 
+                        "text": 
+                        {
+                            "type": "mrkdwn",
+                            "text": (
+                                "👋 *Welcome!* I'm your *Ask-Support* Bot, here to help you with all your support needs.\n\n\n"
+                            )
+                        }
+                    },
+                    {
+                        "type": "context",
+                        "elements": [
+                            {
+                                "type": "mrkdwn",
+                                "text": "I'm an AI-powered Slack bot built on IBM’s Granite LLM that analyze and summarizes escalation threads in real time, highlights key actions and decisions, and lets you ask follow-up questions instantly."
+                                        # "Ask-Support Slack bot is built on generative AI powered by the latest IBM Granite Large Language Model to read and analyze support escalation slack threads in real time and summarize discussions, highlight action items, and decision."
+                                        # "It also provide an AI chat interface to ask additional questions about the escalation thread or any question instantly in the IBM Data and AI or IBM Software workspace."
+                            }
+                        ]
+                    },
+
+                    {"type": "divider"},
+
+                    # How to use Me
+                    {
+                        "type": "header",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "🚀  How to use Me.. \n\n",
+                            "emoji": True
+                        }
+                    },
+
+                    {"type": "divider"},
+
+                    # Chat method instructions
+                    {
+                        "type": "section", 
+                        "text": 
+                        {
+                            "type": "mrkdwn",
+                            "text": "💬 Using Chat Method (*Through Ask-Support App):* \n\n"
+                        }
+                    },
+                    { "type": "section",
+                      "text": {
+                            "type": "mrkdwn",
+                            "text": (
+                                "• Click on `+ Add apps` button → Type *_Ask-Support_* in the Search Box → Click on *_Ask-Support_* app → Click on `Open App`.\n"
+                                "• For Analyze Thread: Type `analyze` then paste `thread URL` in the textbox. (eg: `analyze https://example.slack.com/archives/CXXXXXX/p12345678`).\n" 
+                                "• For Analyze Channel: Type `analyze` then type/paste `channel-name` in the textbox.\n"
+                                "• Type Keywords like `explain` or `summarize` to break down details instantly.\n"
+                            )
+                        }
+                    },
+
+                    {"type": "divider"},
+
+                    # Invite instructions
+                    {
+                        "type": "section", 
+                        "text": 
+                        {
+                            "type": "mrkdwn",
+                            "text": "✈️ Invite me to a channel: \n"
+                        }
+                    },
+                    {
+                        "type": "section", 
+                        "block_id": "invite_info", 
+                        "text": 
+                        {
+                            "type": "mrkdwn",
+                            "text": (
+                                "• In your channel, type `/invite @Ask-Support` in the textbox → Click `➤` or Press Return/Enter button.\n"
+                                "• In your channel, type `@Ask-Support` and send → when Slackbot asks (`Add Them` or `Do Nothing`), click “Add them” to invite me.\n"
+                            )
+                        }
+                    },
+
+                    {"type": "divider"},
+
+                    # Try it from here
+                    {
+                        "type": "header",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "📌 Try It From Here. \n\n",
+                            "emoji": True
+                        }
+                    },
+                    
+                    {"type": "divider"},
+
+                    # Public channel selector
+                    {
+                        "type": "section", 
+                        "text": 
+                        {
+                            "type": "mrkdwn",
+                            "text": "*Use Case: Add me to a public channel*"
+                        }
+                    },
+                    {
+                        "type": "context",
+                        "elements": [
+                            {
+                                "type": "mrkdwn",
+                                "text": "_Select *#channel-name* from below Dropdown List to Join This Channel_"
+                            }
+                        ]
+                    },
+                    {
+                        "type": "actions", 
+                        "block_id": "public_invite",
+                        "elements": 
+                        [
+                            {
+                                "type": "conversations_select",
+                                "action_id": "select_channel_to_join",
+                                "placeholder": 
+                                {
+                                    "type": "plain_text", 
+                                    "text": "Select a channel…", 
+                                    "emoji": True
+                                },
+                                "filter": 
+                                {
+                                    "include": ["public", "private"]
+                                }
+                            }
+                        ]
+                    },
+
+                    {"type": "divider"},
+
+                    # Use Case: Analyze Channel
+                    {
+                        "type": "section", 
+                        "block_id": "channel_section", 
+                        "text": 
+                        {
+                            "type": "mrkdwn",
+                            "text": (
+                                "*Use Case: Analyze a Channel*\n\n"
+                            )
+                        }
+                    },
+                    {
+                        "type": "context",
+                        "elements": [
+                            {
+                                "type": "mrkdwn",
+                                "text": "_Select #channel-name from Dropdown below, then click *Analyze Channel* Button._"
+                            }
+                        ]
+                    },
+                    {
+                        "type": "actions", 
+                        "block_id": "channel_input_block", 
+                        "elements": [
+                            {
+                                "type": "conversations_select",
+                                "action_id": "analyze_channel_select",
+                                "placeholder": 
+                                {
+                                    "type": "plain_text", 
+                                    "text": "Select a channel…"
+                                },
+                                "filter": 
+                                {
+                                    "include": ["public", "private"]
+                                }
+                            },
+                            {
+                                "type": "button", 
+                                "text": 
+                                {
+                                    "type": "plain_text", 
+                                    "text": "🚀 Analyze Channel"
+                                }, 
+                                "style": "primary", 
+                                "action_id": "analyze_channel_button"}
+                        ]
+                    },
+                    {"type": "divider"},
+
+                    # Use Case: Analyze Thread
+                    {
+                        "type": "section", 
+                        "block_id": "thread_section", 
+                        "text": {"type": "mrkdwn",
+                            "text": (
+                                "*Use Case: Analyze a Thread*\n\n"
+                            )
+                        }
+                    },
+                    {
+                        "type": "context",
+                        "elements": [
+                            {
+                                "type": "mrkdwn",
+                                "text": "_Paste a thread URL in the box below, then click *Analyze Thread* Button._"
+                            }
+                        ]
+                    },
+                    {
+                        "type": "input",
+                        "block_id": "thread_input",
+                        "element": {
+                            "type": "plain_text_input",
+                            "action_id": "thread_url_input",
+                            "multiline": True,
+                            "placeholder": {
+                            "type": "plain_text",
+                            "text": "Paste full thread URL here (e.g., https://example.slack.com/archives/CXXXXXX/p12345678)"
+                            }
+                        },
+                        "label": {
+                            "type": "plain_text",
+                            "text": " "
+                        }
+                    },
+                    {
+                        "type": "actions", 
+                        "block_id": "thread_actions", 
+                        "elements": [
+                            {
+                                "type": "button", 
+                                "text": 
+                                {
+                                    "type": "plain_text", 
+                                    "text": "🚀 Analyze Thread"
+                                }, 
+                                "style": "primary", 
+                                "action_id": "analyze_thread_button"
+                            }
+                        ]
+                    },
+                    {"type": "divider"},
+
+                    {
+                        "type": "rich_text",
+                        "elements": [
+                            # Features summary
+                            {
+                                "type": "rich_text_section",
+                                "elements": [
+                                    {
+                                        "type": "text",
+                                        "text": "⭐️ Features at a glance: \n",
+                                        "style": {
+                                            "bold": True
+                                        }
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "rich_text_preformatted",
+                                "elements": [
+                                    {
+                                        "type": "text",
+                                        "text": "\n• Thread & channel summarization\n"
+                                                "• PDF/TXT/CSV/XLSX parsing & Q&A\n"
+                                                "• Multi-language translation\n"
+                                                "• Export summaries as PDF\n"
+                                                "• Instant chat responses\n\n"
+                                                "📜 Use Cases: \n"
+                                                "_______________\n"
+                                                "1️⃣ Document Q&A: \n"
+                                                "• Upload PDF, TXT, CSV, or XLSX files in a DM.\n"
+                                                "• Start a thread and ask questions about the document contents.\n\n"
+                                                "2️⃣ General Q&A: \n"
+                                                "• Ask me anything in a DM or mention me in a channel.\n"
+                                                "• I'll respond based on my training and the latest data.\n\n"
+                                                "3️⃣ Persistent Knowledge Base: \n"
+                                                "• Access your already-loaded, org-wide knowledge base right from a DM or channel.\n"
+                                                "• Use the `-org` command at the start of your message, followed by your question."
+
+                                    }
+                                ]
+                            },
+                        ]
+                    },
+                    # FAQ Section
+                    {
+                        "type": "header", 
+                        "text": 
+                        {
+                            "type": "plain_text", 
+                            "text": "🌀 Frequently Asked Questions", 
+                            "emoji": True
+                        }
+                    },
+                    
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": (
+                                "*Q1. I tried to analyze a thread or channel, but it's not working.*\n"
+                                "Make sure the bot has been *_invited to that channel_* first. "
+                                "Without being a member, the bot cannot access messages or perform analysis. "
+                                "Invite it using `/invite @Ask-Support`."
+                            )
+                        }
+                    },
+
+                    {"type": "divider"},
+
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": (
+                                "*Q2. I uploaded a file, but it didn’t give a proper response.*\n"
+                                "Currently, the bot supports *_PDF, TXT, CSV, and XLSX_* files only. "
+                                "Other file formats like DOCX or PPTX are not yet supported — stay tuned for future updates."
+                            )
+                        }
+                    },
+
+                    {"type": "divider"},
+
+                    {
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": (
+                                "*Q3. I asked a question in a channel, but the bot didn’t reply.*\n"
+                                "*When messaging *in a channel*, always *_@mention the bot_* "
+                                "(e.g., `@Ask-Support summarize this thread`). "
+                                "In DMs, you don’t need to mention it. "
+                                "In thread replies inside a channel, also ensure you mention the bot to trigger its response."
+                            )
+                        }
+                    },
+                    # Footer / Help
+                    # {"type": "context", "elements": [
+                    #     {"type": "mrkdwn", "text": (
+                    #         "💡 Need help? Type `help` in a DM or visit <https://example.com/docs|our docs>."
+                    #     )}
+                    # ]}
+                ]
+            }
+        )
+    except Exception as e:
+        logger.error(f"Failed to publish home tab for {user_id}: {e}")
+
+# Public invite handler remains the same
 @app.action("select_channel_to_join")
 def handle_conversation_select(ack, body, client, logger):
-    
     ack()
-
     user_id = body["user"]["id"]
-    channel_id = body["actions"][0]["selected_conversation"]
+    selected_channel = body["actions"][0]["selected_conversation"]
+    requesting_team = detect_real_team_from_event(body, body.get("container", {}) or {})  # best-effort (may be None)
 
-    try:
-        if channel_id.startswith("C"):
-            # Public channel → bot can join itself
-            client.conversations_join(channel=channel_id)
+    logger.info(f"User {user_id} requested bot join for channel {selected_channel!r}")
 
-        else:
-            # Private channel (ID starts with "G") → invite the bot user
-            bot_user_id = client.auth_test()["user_id"]
-            client.conversations_invite(
-                channel=channel_id,
-                users=bot_user_id
-            )
+    # Try to find which workspace actually has that channel by iterating configured clients.
+    success = False
+    errors = []
+    for tid, candidate_client in ROUTER.iter_clients_with_priority(requesting_team):
+        try:
+            # First verify channel exists in this workspace
+            # conversations_info will raise SlackApiError if not found/permission denied
+            candidate_client.conversations_info(channel=selected_channel)
+        except Exception as e:
+            # Not in this workspace (or no permission) — try next
+            logger.debug(f"Channel {selected_channel} not found or inaccessible in team {tid}: {e}")
+            errors.append((tid, str(e)))
+            continue
 
-        # Success message into that channel
+        # If we reach here the channel belongs to this workspace / is accessible with this client
+        try:
+            # Determine public vs private: conv.info gives 'is_private'
+            info = candidate_client.conversations_info(channel=selected_channel)["channel"]
+            is_private = info.get("is_private", False)
+
+            if not is_private:
+                # Public channel: bot can join itself
+                candidate_client.conversations_join(channel=selected_channel)
+                msg = f"✅ I joined <#{selected_channel}>. You can see me in the channel." # in team `{tid}`."
+                candidate_client.chat_postMessage(channel=selected_channel, text="👋 Hey — I’m here to help!\n _For Usage Instructions: type `@Ask-Support help`._")
+                client.chat_postMessage(channel=user_id, text=msg)
+                logger.info(msg)
+                success = True
+                break
+            else:
+                # Private channel: invite the bot user (requires the token we used to match workspace)
+                bot_user_id = candidate_client.auth_test()["user_id"]
+                # Invite the bot user (the caller of invite must have permission; this will often succeed when using workspace bot token)
+                candidate_client.conversations_invite(channel=selected_channel, users=bot_user_id)
+                msg = f"✅ I was invited to the private channel <#{selected_channel}>. You can see me in the channel." # in team `{tid}`."
+                candidate_client.chat_postMessage(channel=selected_channel, text="👋 I was added — ready to help!\n _For Usage Instructions: type `@Ask-Support help`._")
+                client.chat_postMessage(channel=user_id, text=msg)
+                logger.info(msg)
+                success = True
+                break
+
+        except Exception as e:
+            # permission or other failure; include Slack error if available
+            err_text = getattr(e, "response", {}).get("error") if hasattr(e, "response") else str(e)
+            logger.error(f"Failed to add bot to channel {selected_channel} in team {tid}: {err_text}")
+            errors.append((tid, err_text or str(e)))
+            # do not return yet — maybe another workspace contains the channel
+
+    if not success:
+        # build helpful error message
+        details = "\n".join([f"- team `{tid}`: `{err}`" for tid, err in errors[:5]])
         client.chat_postMessage(
-            channel=channel_id,
-            text="👋 Thanks for adding me!"
+            channel=user_id,
+            text=(
+                ":x: I wasn’t able to add me to that channel. Possible reasons:\n"
+                "• The app isn't installed in the target workspace.\n"
+                "• The bot token for that workspace is missing or lacks required scopes.\n"
+                "• The channel is private and invites are restricted.\n\n"
+                f"Tries attempted (sample):\n{details}\n\n"
+                "Ask an admin to install the app in the other workspace or ensure the bot has `conversations.join` / `conversations.invite` scopes."
+            )
         )
 
-    except SlackApiError as e:
-        error_code = e.response["error"]
-        logger.error(f"couldn’t add me to {channel_id}: {error_code}")
-
-        # Let the user know in that same channel via ephemeral
-        # send the error as a DM to the user
-        client.chat_postMessage(
-    channel=user_id,
-    text=f":x: I wasn’t able to add me to <#{channel_id}>: `{error_code}`"
-)
 @app.action("analyze_button")
 def handle_analyze_button(ack, body, client, logger):
     # 1️⃣ Acknowledge right away so Slack doesn’t complain
@@ -1088,7 +1847,7 @@ def handle_analyze_button(ack, body, client, logger):
         }
 
         # 4️⃣ Hand it off to your unified analysis routine
-        do_analysis(fake_event, client)
+        do_analysis(None, fake_event, client)
 
     except Exception as e:
         logger.error(f"Error in analyze_button handler: {e}")
@@ -1097,147 +1856,8 @@ def handle_analyze_button(ack, body, client, logger):
             channel=body["user"]["id"],
             text=":warning: Oops, something went wrong trying to analyze that channel."
         )
-@app.event("app_home_opened")
-def update_home_tab(client, event, logger):
-    user_id = event["user"]
-    try:
-        client.views_publish(
-            user_id=user_id,
-            view={
-                "type": "home",
-                "callback_id": "home_view",
-                "blocks": [
-                    # Header
-                    {"type": "header", "text": {"type": "plain_text", "text": "🔎 Ask-Support-Bot", "emoji": True}},
-                    {"type": "divider"},
 
-                    # Welcome section
-                    {"type": "section", "text": {"type": "mrkdwn",
-                        "text": (
-                            "👋 *Welcome!* I'm your *Ask-Support-Bot*, here to help you with all your support needs."
-                        )
-                    }},
-                    {"type": "divider"},
-
-                    # How it works
-{"type": "section", "text": {"type": "mrkdwn",
-   "text": (
-       "*How it works:*\n\n"
-       "1️⃣  *Chat Method:* DM me with keywords like `analyze`, `explain`, or `summarize` followed by:\n\n"
-       "     • Thread URL for thread analysis\n\n"
-       "     • `#channel-name` for channel analysis\n\n"
-       "2️⃣  *App Home Method:* Use the forms below to paste URLs or select channels directly.\n\n"
-       "3️⃣  *Get Results:* Receive structured summaries in your DMs."
-   )
-}},
-                    {"type": "divider"},
-
-                    # Invite instructions
-                    {"type": "section", "block_id": "invite_info", "text": {"type": "mrkdwn",
-                        "text": (
-                            "*Invite me to a channel:*\n\n"
-                            "• *Public:* use the selector below.\n\n"
-                            "• *Private:* type `/invite @Botico` or mention me in the channel."
-                        )
-                    }},
-                    {"type": "divider"},
-
-                    # Public channel selector
-                    {"type": "section", "text": {"type": "mrkdwn",
-                        "text": "➕ *Add me to a public channel:*"
-                    }},
-                    {"type": "actions", "block_id": "public_invite", "elements": [
-                        {
-                            "type": "conversations_select",
-                            "action_id": "select_channel_to_join",
-                            "placeholder": {"type": "plain_text", "text": "Select a channel…", "emoji": True},
-                            "filter": {"include": ["public"]}
-                        }
-                    ]},
-                    {"type": "divider"},
-
-                    # Use Case: Analyze Thread
-                    {"type": "section", "block_id": "thread_section", "text": {"type": "mrkdwn",
-                        "text": (
-                            "*Use Case: Analyze a Thread*\n\n"
-                            "Paste a thread URL in the box below or mention me + URL, then click *Analyze Thread*."
-                        )
-                    }},
-                    {"type": "input", "block_id": "thread_input", "element": {
-                        "type": "plain_text_input",
-                        "action_id": "thread_url_input",
-                        "placeholder": {"type": "plain_text", "text": "Paste thread URL here..."}
-                    }, "label": {"type": "plain_text", "text": "Thread URL"}},
-                    {"type": "actions", "block_id": "thread_actions", "elements": [
-                        {"type": "button", "text": {"type": "plain_text", "text": "🚀 Analyze Thread"}, "style": "primary", "action_id": "analyze_thread_button"}
-                    ]},
-                    {"type": "divider"},
-
-                    # Use Case: Analyze Channel
-                    {"type": "section", "block_id": "channel_section", "text": {"type": "mrkdwn",
-                        "text": (
-                            "*Use Case: Analyze a Channel*\n\n"
-                            "Type `analyze #channel-name` in DM or select below, then click *Analyze Channel*."
-                        )
-                    }},
-                    {"type": "actions", "block_id": "channel_input_block", "elements": [
-                        {
-                            "type": "conversations_select",
-                            "action_id": "analyze_channel_select",
-                            "placeholder": {"type": "plain_text", "text": "Select a channel…"},
-                            "filter": {"include": ["public", "private"]}
-                        },
-                        {"type": "button", "text": {"type": "plain_text", "text": "🚀 Analyze Channel"}, "style": "primary", "action_id": "analyze_channel_button"}
-                    ]},
-                    {"type": "divider"},
-
-                    # Use Case: Document Q&A
-                    {"type": "section", "block_id": "file_section", "text": {"type": "mrkdwn",
-                        "text": (
-                            "*Use Case: Document Q&A*\n\n"
-                            "Upload PDF, TXT, CSV, or XLSX files in a DM.\n"
-                            "Start a thread and ask questions about the document contents."
-                        )
-                    }},
-        
-                    {"type": "divider"},
-
-                    # Use Case: General Q&A
-                    {"type": "section", "block_id": "general_section", "text": {"type": "mrkdwn",
-                        "text": (
-                            "*Use Case: General Q&A*\n\n"
-                            "Ask me anything in a DM or mention me in a channel.\n"
-                            "I'll respond based on my training and the latest data."
-                        )
-                    }},
-                    {"type": "divider"},
-
-                    # Features summary
-                    {"type": "section", "text": {"type": "mrkdwn",
-                        "text": (
-                            "*Features at a glance:*\n\n"
-                            "• Thread & channel summarization\n\n"
-                            "• PDF/TXT/CSV/XLSX parsing & Q&A\n\n"
-                            "• Multi-language translation\n\n"
-                            "• Export summaries as PDF\n\n"
-                            "• Instant chat responses"
-                        )
-                    }},
-                    {"type": "divider"},
-
-                    # Footer / Help
-                    # {"type": "context", "elements": [
-                    #     {"type": "mrkdwn", "text": (
-                    #         "💡 Need help? Type `help` in a DM or visit <https://example.com/docs|our docs>."
-                    #     )}
-                    # ]}
-                ]
-            }
-        )
-    except Exception as e:
-        logger.error(f"Failed to publish home tab for {user_id}: {e}")
-# Public invite handler remains the same
-@app.action("select_channel_to_join")
+# @app.action("select_channel_to_join")
 # def handle_conversation_select(ack, body, client, logger):
 #     ack()
 #     user_id = body["user"]["id"]
@@ -1254,6 +1874,35 @@ def update_home_tab(client, event, logger):
 #         logger.error(e)
 #         client.chat_postMessage(channel=user_id, text=f":x: Couldn’t add me: `{e.response['error']}`")
 
+# Analyze Channel Select Menu
+@app.action("analyze_channel_select")
+def handle_home_analyze_select(ack, body, logger):
+    """
+    Minimal handler for the Home tab 'Analyze Channel' conversations_select.
+    IMPORTANT: ack() must be called immediately to avoid Slack showing the spinner/warning.
+    """
+    try:
+        # ACK first, always (very fast)
+        ack()
+
+        # Safely extract what user picked (do work only after ack)
+        user_id = body.get("user", {}).get("id")
+        actions = body.get("actions", []) or []
+        selected = None
+        if actions:
+            selected = actions[0].get("selected_conversation")  # channel id like C012345
+        logger.info("Home dropdown selection by %s -> %s", user_id, selected)
+
+        # Optional: cache selection so analyze_button can read it (safe, in-memory)
+        if user_id and selected:
+            USER_SELECTED_CHANNELS[user_id] = selected
+
+        # DON'T do any heavy work here, and DON'T call views_publish() synchronously.
+        # If you need to update the Home view, schedule that after ack in background.
+    except Exception as e:
+        # ack() already called; exceptions here won't trigger the warning icon.
+        logger.exception("Error in analyze_channel_select handler: %s", e)
+
 # Analyze Thread button
 @app.action("analyze_thread_button")
 def handle_analyze_thread_button(ack, body, client, logger):
@@ -1264,8 +1913,28 @@ def handle_analyze_thread_button(ack, body, client, logger):
     if not m:
         return client.chat_postMessage(channel=user, text=":x: Invalid thread URL.")
     fake = {"type":"message","user":user,"text":url,"channel":user,"ts":body["actions"][0]["action_ts"]}
-    do_analysis(fake, client)
+    do_analysis(None, fake, client)
 
+@app.action("analyze_channel_button")
+def handle_analyze_channel_button(ack, body, client, logger):
+    ack()  # Always acknowledge
+
+    # `trigger_id` is available here because this is an interactive action
+    trigger_id = body["trigger_id"]
+    meta = json.loads(body["actions"][0]["value"])
+
+    open_date_time_dialog(
+        client=client,
+        trigger_id=trigger_id,
+        channel_id=meta["channel_id"],
+        channel_name=meta["channel_name"],
+        origin_channel=meta["origin_channel"],
+        thread_ts=meta["thread_ts"],
+        user_id=meta["user_id"],
+        team_id=meta["team_id"]
+    )
+
+'''
 # Analyze Channel button
 @app.action("analyze_channel_button")
 def handle_analyze_channel_button(ack, body, client, logger):
@@ -1273,7 +1942,8 @@ def handle_analyze_channel_button(ack, body, client, logger):
     user = body["user"]["id"]
     cid = body["view"]["state"]["values"]["channel_input_block"]["analyze_channel_select"]["selected_conversation"]
     fake = {"type":"message","user":user,"text":f"analyze <#{cid}>","channel":user,"ts":body["actions"][0]["action_ts"]}
-    do_analysis(fake, client)
+    do_analysis(None, fake, client)
+'''
 
 @app.action("button_click")
 def handle_button_click(ack, body, client, logger):
@@ -1292,3 +1962,4 @@ if __name__=="__main__":
         logging.exception(f"Startup indexing failed: {e}")
     threading.Thread(target=run_health_server, daemon=True).start()
     SocketModeHandler(app,SLACK_APP_TOKEN).start()
+# ────────────────────────────────────────────────────────────────

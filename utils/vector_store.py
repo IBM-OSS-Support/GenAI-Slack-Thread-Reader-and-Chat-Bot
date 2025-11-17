@@ -29,7 +29,9 @@ class FaissVectorStore:
         self.docstore_path = docstore_path or default_doc
 
         OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
-        OLLAMA_MODEL_NAME = os.getenv("OLLAMA_MODEL_NAME", "granite3.3:8b")
+        OLLAMA_MODEL_NAME = os.getenv("OLLAMA_EMBED_MODEL_NAME", "nomic-embed-text:latest")
+        # "nomic-embed-text:latest"
+        
         self.embeddings = embedding_model or OllamaEmbeddings(
             model=OLLAMA_MODEL_NAME, 
             base_url=OLLAMA_BASE_URL,
