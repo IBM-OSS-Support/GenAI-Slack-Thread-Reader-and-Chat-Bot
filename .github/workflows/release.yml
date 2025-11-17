@@ -14,11 +14,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}  # or PAT_TOKEN if needed
+          token: ${{ secrets.GITHUB_TOKEN }}
           ref: automate-test-branch
-          fetch-depth: 0  # Needed to get full commit history
+          fetch-depth: 0
 
-      - name: Set up Python (3.11)
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
@@ -36,49 +36,30 @@ jobs:
         run: |
           python utils/scripts/bump_version.py "${{ env.COMMIT_MSG }}"
 
-      - name: Debug - Show file changes
+      - name: Debug - Show file changes (Optional but helpful)
         run: |
-          echo "=== version.txt content ==="
+          echo "=== version.txt ==="
           cat version.txt
-          echo "=== end version.txt ==="
-          echo "=== Last 10 lines of release-note.md ==="
+          echo "=== release-note.md (last 10 lines) ==="
           tail -n 10 release-note.md
           echo "=== git status ==="
           git status
           echo "=== git diff ==="
           git diff
 
-      - name: Configure Git
+      - name: Configure Git & Commit changes
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-
-      - name: Commit updated files
-        run: |
           git add version.txt release-note.md
           git commit -m "chore: auto-bump to v${{ steps.bump.outputs.new_version }}"
 
-      - name: Push changes
+      - name: Push changes to branch
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # Stage files
-          git add version.txt release-note.md
-          
-          # Check if there are actual changes to commit
-          if ! git diff-index --quiet HEAD --; then
-            git commit -m "chore: auto-bump to v${{ steps.bump.outputs.new_version }}"
-            echo "✅ Changes committed. Pushing..."
-            
-            # Push to target branch (use PAT if GITHUB_TOKEN fails)
-            git push origin HEAD:automate-test-branch || {
-              echo "❌ Push failed. Branch may be protected. Consider using a PAT."
-              exit 1
-            }
-          else
-            echo "ℹ️ No file changes detected. Skipping commit & push."
-          fi
+          git push origin HEAD:automate-test-branch || {
+            echo "❌ Push failed. Branch may be protected. Consider using a PAT."
+            exit 1
+          }
 
       # - name: Create Release (Optional)
       #   uses: actions/create-release@v1
