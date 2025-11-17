@@ -14,7 +14,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.PAT_TOKEN }}  # or GITHUB_TOKEN if needed
+          token: ${{ secrets.GITHUB_TOKEN }}  # or PAT_TOKEN if needed
           ref: automate-test-branch
           fetch-depth: 0  # Needed to get full commit history
 
