@@ -1,17 +1,17 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: slack-bot-llm
+  name: slack-bot-prod
   namespace: llm
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: slack-bot-llm
+      app: slack-bot-prod
   template:
     metadata:
       labels:
-        app: slack-bot-llm
+        app: slack-bot-prod
     spec:
       nodeSelector:
         kubernetes.io/hostname: worker4.epgui.cp.fyre.ibm.com
@@ -20,90 +20,108 @@ spec:
         runAsUser: 2000
       containers:
       - name: slack-bot
-        image: ghcr.io/ibm-oss-support/slack-bot:latest
+        image: ghcr.io/ibm-oss-support/slack-bot:__VERSION__
         imagePullPolicy: Always
         env:
           - name: TEAM1_ID
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets
-                  key: TEAM1_ID
+              secretKeyRef:
+                name: slack-secrets
+                key: TEAM1_ID
+
           - name: TEAM1_BOT_TOKEN
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets
-                  key: TEAM1_BOT_TOKEN
+              secretKeyRef:
+                name: slack-secrets
+                key: TEAM1_BOT_TOKEN
+
           - name: TEAM2_ID
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets
-                  key: TEAM2_ID
+              secretKeyRef:
+                name: slack-secrets
+                key: TEAM2_ID
+
           - name: TEAM2_BOT_TOKEN
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets
-                  key: TEAM2_BOT_TOKEN
+              secretKeyRef:
+                name: slack-secrets
+                key: TEAM2_BOT_TOKEN
+
           - name: SLACK_APP_TOKEN
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets
-                  key: SLACK_APP_TOKEN
+              secretKeyRef:
+                name: slack-secrets
+                key: SLACK_APP_TOKEN
+
           - name: SLACK_SIGNING_SECRET
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets
-                  key: SLACK_SIGNING_SECRET
+              secretKeyRef:
+                name: slack-secrets
+                key: SLACK_SIGNING_SECRET
+
           - name: BOT_USER_ID
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets
-                  key: BOT_USER_ID
+              secretKeyRef:
+                name: slack-secrets
+                key: BOT_USER_ID
+
           - name: OLLAMA_BASE_URL
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets
-                  key: OLLAMA_BASE_URL
+              secretKeyRef:
+                name: slack-secrets
+                key: OLLAMA_BASE_URL
+
           - name: SESSION_EXPIRATION_SECONDS
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets
-                  key: SESSION_EXPIRATION_SECONDS
+              secretKeyRef:
+                name: slack-secrets
+                key: SESSION_EXPIRATION_SECONDS
+
           - name: FORMATTED_CHANNELS
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets
-                  key: FORMATTED_CHANNELS
+              secretKeyRef:
+                name: slack-secrets
+                key: FORMATTED_CHANNELS
+
           - name: STATS_FILE
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets
-                  key: STATS_FILE
+              secretKeyRef:
+                name: slack-secrets
+                key: STATS_FILE
+
           - name: VECTOR_INDEX_PATH
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets
-                  key: VECTOR_INDEX_PATH
+              secretKeyRef:
+                name: slack-secrets
+                key: VECTOR_INDEX_PATH
+
           - name: DOCSTORE_PATH
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets
-                  key: DOCSTORE_PATH
+              secretKeyRef:
+                name: slack-secrets
+                key: DOCSTORE_PATH
+
           - name: OLLAMA_MODEL_NAME
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets
-                  key: OLLAMA_MODEL_NAME
+              secretKeyRef:
+                name: slack-secrets
+                key: OLLAMA_MODEL_NAME
+
           - name: OLLAMA_EMBED_MODEL_NAME
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets
-                  key: OLLAMA_EMBED_MODEL_NAMEs
+              secretKeyRef:
+                name: slack-secrets
+                key: OLLAMA_EMBED_MODEL_NAME
+
           - name: STARTUP_FILES
             value: /app/data/uploads/final-org-chart.xlsx
+
         volumeMounts:
-        - name: stats-volume
-          mountPath: /app/data
+          - name: stats-volume
+            mountPath: /app/data
+
       volumes:
-      - name: stats-volume
-        persistentVolumeClaim:
-          claimName: stats-pvc # static PVC
+        - name: stats-volume
+          persistentVolumeClaim:
+            claimName: asksupport-stats-pvc
+

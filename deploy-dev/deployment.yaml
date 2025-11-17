@@ -1,17 +1,17 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: slack-bot-dev
+  name: asksupport-bot-dev
   namespace: dev
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: slack-bot-dev
+      app: asksupport-bot-dev
   template:
     metadata:
       labels:
-        app: slack-bot-dev
+        app: asksupport-bot-dev
     spec:
       nodeSelector:
         kubernetes.io/hostname: worker4.epgui.cp.fyre.ibm.com
@@ -22,88 +22,125 @@ spec:
       - name: slack-bot
         image: ghcr.io/ibm-oss-support/slack-bot:__VERSION__
         imagePullPolicy: Always
+        ports:
+          - containerPort: 3000
+          - containerPort: 3001
         env:
           - name: TEAM1_ID
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets-dev
-                  key: TEAM1_ID
+              secretKeyRef:
+                name: slack-secrets-dev
+                key: TEAM1_ID
+
           - name: TEAM1_BOT_TOKEN
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets-dev
-                  key: TEAM1_BOT_TOKEN
+              secretKeyRef:
+                name: slack-secrets-dev
+                key: TEAM1_BOT_TOKEN
+
           - name: TEAM2_ID
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets-dev
-                  key: TEAM2_ID
+              secretKeyRef:
+                name: slack-secrets-dev
+                key: TEAM2_ID
+
           - name: TEAM2_BOT_TOKEN
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets-dev
-                  key: TEAM2_BOT_TOKEN
+              secretKeyRef:
+                name: slack-secrets-dev
+                key: TEAM2_BOT_TOKEN
+
           - name: SLACK_APP_TOKEN
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets-dev
-                  key: SLACK_APP_TOKEN
+              secretKeyRef:
+                name: slack-secrets-dev
+                key: SLACK_APP_TOKEN
+
           - name: SLACK_SIGNING_SECRET
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets-dev
-                  key: SLACK_SIGNING_SECRET
+              secretKeyRef:
+                name: slack-secrets-dev
+                key: SLACK_SIGNING_SECRET
+
           - name: BOT_USER_ID
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets-dev
-                  key: BOT_USER_ID
+              secretKeyRef:
+                name: slack-secrets-dev
+                key: BOT_USER_ID
+
           - name: OLLAMA_BASE_URL
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets-dev
-                  key: OLLAMA_BASE_URL
+              secretKeyRef:
+                name: slack-secrets-dev
+                key: OLLAMA_BASE_URL
+
           - name: SESSION_EXPIRATION_SECONDS
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets-dev
-                  key: SESSION_EXPIRATION_SECONDS
+              secretKeyRef:
+                name: slack-secrets-dev
+                key: SESSION_EXPIRATION_SECONDS
+
           - name: FORMATTED_CHANNELS
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets-dev
-                  key: FORMATTED_CHANNELS
+              secretKeyRef:
+                name: slack-secrets-dev
+                key: FORMATTED_CHANNELS
+
           - name: STATS_FILE
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets-dev
-                  key: STATS_FILE
+              secretKeyRef:
+                name: slack-secrets-dev
+                key: STATS_FILE
+
           - name: VECTOR_INDEX_PATH
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets-dev
-                  key: VECTOR_INDEX_PATH
+              secretKeyRef:
+                name: slack-secrets-dev
+                key: VECTOR_INDEX_PATH
+
           - name: DOCSTORE_PATH
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets-dev
-                  key: DOCSTORE_PATH
+              secretKeyRef:
+                name: slack-secrets-dev
+                key: DOCSTORE_PATH
+
           - name: OLLAMA_MODEL_NAME
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets-dev
-                  key: OLLAMA_MODEL_NAME
+              secretKeyRef:
+                name: slack-secrets-dev
+                key: OLLAMA_MODEL_NAME
+
           - name: OLLAMA_EMBED_MODEL_NAME
             valueFrom:
-                secretKeyRef:
-                  name: slack-secrets-dev
-                  key: OLLAMA_EMBED_MODEL_NAMEs
+              secretKeyRef:
+                name: slack-secrets-dev
+                key: OLLAMA_EMBED_MODEL_NAME
+
           - name: STARTUP_FILES
             value: /app/data/uploads/final-org-chart.xlsx
+
+          - name: HEALTH_PORT
+            value: "3001"
+
         volumeMounts:
-        - name: stats-volume
-          mountPath: /app/data
+          - name: stats-volume
+            mountPath: /app/data
+
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3001
+          initialDelaySeconds: 5
+          periodSeconds: 10
+
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3001
+          initialDelaySeconds: 2
+          periodSeconds: 5
+
       volumes:
-      - name: stats-volume
-        persistentVolumeClaim:
-          claimName: oss-stats-pvc 
+        - name: stats-volume
+          persistentVolumeClaim:
+            claimName: asksupportdev-stats-pvc
