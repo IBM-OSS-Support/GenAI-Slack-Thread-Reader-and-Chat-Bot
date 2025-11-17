@@ -36,6 +36,18 @@ jobs:
         run: |
           python utils/scripts/bump_version.py "${{ env.COMMIT_MSG }}"
 
+      - name: Debug - Show file changes
+        run: |
+          echo "=== version.txt content ==="
+          cat version.txt
+          echo "=== end version.txt ==="
+          echo "=== Last 10 lines of release-note.md ==="
+          tail -n 10 release-note.md
+          echo "=== git status ==="
+          git status
+          echo "=== git diff ==="
+          git diff
+
       - name: Configure Git
         run: |
           git config --global user.name "github-actions[bot]"

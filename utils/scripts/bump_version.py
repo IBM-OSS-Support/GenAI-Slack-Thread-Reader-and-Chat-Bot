@@ -76,6 +76,7 @@ def prepend_to_release_notes(note_content):
 
 def main(commit_message):
     current_version, version_lines = read_version()
+    print(f"📥 Current version: {current_version}")
     bump_type = parse_commit_message(commit_message)
 
     # Split subject and body (conventional commits style)
@@ -84,11 +85,13 @@ def main(commit_message):
     body = parts[1].strip() if len(parts) > 1 else ""
 
     new_version = bump_version(current_version, bump_type)
+    print(f"📤 New version: {new_version} (bump: {bump_type})")
     print(f"🔖 Bumping version {current_version} → {new_version} ({bump_type})")
 
     update_version_file(version_lines, new_version)
     release_note = generate_release_note_section(new_version, subject, body)
     prepend_to_release_notes(release_note)
+    print(f"💾 Updated {VERSION_FILE} and {RELEASE_NOTE_FILE}")
 
     # Output for GitHub Actions to use
     github_output = os.getenv('GITHUB_OUTPUT')
