@@ -15,6 +15,14 @@
 ---
 
 
+## ➕ v2.3.2 — Added new function for updating timeline summary section
+📅 Nov 17  2025  
+
+### Highlights
+- Added new function for updating timeline summary section
+
+---
+
 ## ➕ v2.3.1 — Updated yml file
 📅 Nov 17  2025  
 
