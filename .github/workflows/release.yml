@@ -3,73 +3,63 @@ name: Automated Release - GenAI Slack Thread Reader and Chat Bot
 on:
   push:
     branches:
-      - automate-test-branch
       # - dev
-      # - main
-
-permissions:
-  contents: write
-  id-token: write
+      - automate-test-branch
+  workflow_dispatch:  # Allow manual trigger
 
 jobs:
-  release:
+  bump-version:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout full history & tags
+      - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          fetch-tags: true
-          persist-credentials: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0  # Needed to get full commit history
 
       - name: Set up Python (3.11)
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.10'
 
-      - name: Install python-semantic-release and debug deps
+      - name: Get latest commit message
+        id: commit
         run: |
-          python -m pip install --upgrade pip
-          pip install python-semantic-release tomli
+          COMMIT_MSG=$(git log -1 --pretty=%B)
+          echo "COMMIT_MSG<<EOF" >> $GITHUB_ENV
+          echo "$COMMIT_MSG" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
 
-      - name: Print semantic-release config read by CI (safe for py3.10/3.11)
+      - name: Run version bump script
+        id: bump
         run: |
-          python - <<'PY'
-          # works on both Python 3.11 (tomllib) and 3.10 (tomli)
-          try:
-              import tomllib
-          except Exception:
-              import tomli as tomllib
-          import pathlib, json, sys
-          p = pathlib.Path('pyproject.toml')
-          if not p.exists():
-              print("pyproject.toml not found", file=sys.stderr); sys.exit(2)
-          cfg = tomllib.loads(p.read_text(encoding='utf8'))
-          sr = cfg.get("tool", {}).get("semantic_release", {})
-          print("semantic_release top-level keys:", list(sr.keys()))
-          print("version_source:", sr.get("version_source"))
-          print("patch_without_tag:", sr.get("patch_without_tag"))
-          print("post_release_hook:", sr.get("post_release_hook"))
-          print("branches keys:", list(sr.get("branches", {}).keys()))
-          print(json.dumps(sr, indent=2))
-          PY
+          python scripts/bump_version.py "${{ env.COMMIT_MSG }}"
 
-      - name: Debug git info (CI)
+      - name: Configure Git
         run: |
-          echo "===== git status ====="
-          git status --porcelain --branch
-          echo "===== current branch ====="
-          git rev-parse --abbrev-ref HEAD || true
-          echo "GITHUB_REF=$GITHUB_REF"
-          echo "===== recent commits ====="
-          git --no-pager log -n 5 --oneline
-          echo "===== local tags ====="
-          git tag --list
-          echo "===== remote tags ====="
-          git ls-remote --tags origin | sed -n '1,50p' || true
-          git describe --tags --abbrev=0 || echo "no tags found"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Run python-semantic-release (commit-based, verbose)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: semantic-release publish
+      - name: Commit updated files
+        run: |
+          git add version.txt release-note.md
+          git commit -m "chore: auto-bump to v${{ steps.bump.outputs.new_version }}"
+
+      - name: Push changes
+        uses: ad-m/github-push-action@master
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          branch: automate-test-branch
+
+      # - name: Create Release (Optional)
+      #   uses: actions/create-release@v1
+      #   env:
+      #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      #   with:
+      #     tag_name: v${{ steps.bump.outputs.new_version }}
+      #     release_name: Release v${{ steps.bump.outputs.new_version }}
+      #     body: |
+      #       Auto-generated from commit.
+      #       Type: ${{ steps.bump.outputs.bump_type }}
+      #     draft: false
+      #     prerelease: false
