@@ -76,13 +76,14 @@ def prepend_to_release_notes(note_content):
 
 def update_timeline_summary(new_version, subject):
     from datetime import datetime
-    import re
 
     # Format date with non-breaking thin spaces (U+202F) to match existing style
     now = datetime.now()
-    day = str(now.day)
-    month = now.strftime("%b")
-    year = str(now.year)
+    day = str(now.day)              # e.g., "17"
+    month = now.strftime("%b")      # e.g., "Nov"
+    year = str(now.year)            # e.g., "2025"
+
+    # Use \u202f (non-breaking thin space) — matches your existing entries
     today = f"{day}\u202f{month}\u202f{year}"
     timeline_entry = f"{today}\u202f→\u202fv{new_version}\u202f—\u202f{subject}"
 
@@ -90,18 +91,17 @@ def update_timeline_summary(new_version, subject):
         with open(RELEASE_NOTE_FILE, 'r', encoding='utf-8') as f:
             content = f.read()
 
-        # Flexible pattern to match timeline header with any mix of spaces/thin spaces
-        pattern = r"(📅[\s\u202f\u00a0]*\*\*Timeline[\s\u202f\u00a0]+Summary[\s\u202f\u00a0]+\(Visual[\s\u202f\u00a0]+Overview\)\*\*)"
-        match = re.search(pattern, content)
-        if not match:
-            print("⚠️ Flexible timeline header pattern not found. Skipping update.")
+        # Match actual header in your file
+        marker = "## 📅 Timeline Summary (Visual Overview)"
+        if marker not in content:
+            print(f"⚠️ Timeline marker '{marker}' not found. Skipping timeline update.")
             return
 
-        header_end = match.end()
-        header = content[:header_end]
-        rest = content[header_end:]
+        parts = content.split(marker, 1)
+        header = parts[0] + marker
+        rest = parts[1]
 
-        # Find where timeline entries end (before first detailed release note)
+        # Find end of timeline block — just before first detailed release note
         timeline_end_pos = rest.find("\n## ➕")
         if timeline_end_pos == -1:
             timeline_end_pos = len(rest)
@@ -114,18 +114,18 @@ def update_timeline_summary(new_version, subject):
             print("⏭️ Timeline entry already exists. Skipping.")
             return
 
-        # Insert new entry at top
-        if not timeline_block.strip().endswith('\n'):
-            timeline_block = timeline_block.rstrip('\n') + '\n'
-        timeline_block = timeline_entry + '\n' + timeline_block.lstrip('\n')
+        # ✅ APPEND at BOTTOM (chronological order)
+        if not timeline_block.endswith('\n'):
+            timeline_block += '\n'
+        timeline_block += timeline_entry + '\n'
 
-        # Reconstruct
+        # Reconstruct file
         updated_content = header + timeline_block + after_block
 
         with open(RELEASE_NOTE_FILE, 'w', encoding='utf-8') as f:
             f.write(updated_content)
 
-        print(f"📈 Timeline summary updated with: {timeline_entry}")
+        print(f"📈 Timeline summary updated (appended at bottom): {timeline_entry}")
 
     except Exception as e:
         print(f"❌ Failed to update timeline: {e}")
