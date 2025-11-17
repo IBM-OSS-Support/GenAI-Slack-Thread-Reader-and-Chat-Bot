@@ -43,7 +43,7 @@ jobs:
 
       - name: 🔍 Debug - Show file changes
         run: |
-          echo "=== version.txt content ==="
+          echo "=== version.txt ==="
           cat version.txt
           echo "=== Last 10 lines of release-note.md ==="
           tail -n 10 release-note.md
