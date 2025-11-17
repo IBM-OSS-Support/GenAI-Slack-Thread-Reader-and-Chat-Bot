@@ -43,16 +43,12 @@ from utils.usage_guide import get_usage_guide
 from chains.analyze_thread import analyze_slack_thread, custom_chain,THREAD_ANALYSIS_BLOBS  # NEW
 
 # ========================================================================================================================
-#todo
+#for purpose todo acxtion item bot
 
 from helper.MainToDo import handle_dm_extraction,handle_channel_extraction,handle_thread_extraction,show_user_tasks
 from db import check_existing_task, delete_task, get_user_tasks, save_task_to_db
 
 # ========================================================================================================================
-
-
-
-
 
 # Instantiate a single global vector store
 # THREAD_VECTOR_STORES: dict[str, FaissVectorStore] = {}
@@ -1088,37 +1084,52 @@ def handle_file_share(body, event, client: WebClient, logger):
 
 # App mention handler: handles mentions and routes file uploads if present
 @app.event("message")
-def handle_direct_message(body,event, client: WebClient, logger):
-   # pick the real workspace:
+
+def handle_direct_message(body, event, say, client, logger):
+    # pick the real workspace:
     real_team = detect_real_team_from_event(body, event)
 
     client = get_client_for_team(real_team)
-    # ignore messages with subtypes (e.g. file_share, bot_message, etc.)
+    actual_client = get_client_for_team(detect_real_team_from_event(body, event)) #For ToDo action item bot
+
     if event.get("subtype"):
         return
 
-    # only handle IM (direct message) channels
-    if event.get("channel_type") != "im":
+    if event.get("channel_type") not in ["im", "channel"]:
         return
 
-    # now your normal chat flow
-    text       = event.get("text", "").strip()
+    text = event.get("text", "").strip()
+    t = text.lower()
     channel_id = event["channel"]
-    user_id    = event["user"]
-    thread_ts  = event.get("ts")
+    user_id = event["user"]
+    thread_ts = event.get("ts")
 
-    # if you want the ?help on empty text? behavior:
     if not text:
         send_message(
-            client, channel_id,
-            ":wave: Hi there! Just mention me in a channel or ask me something right here.",
-            thread_ts=thread_ts, user_id=user_id
+            actual_client,      #For ToDo action item bot
+            #client,
+            channel_id,
+            ":wave: Hi! Ask me something or mention me in a channel.",
+            thread_ts=thread_ts,
+            user_id=user_id
         )
         return
-    
-    # hand off to your RAG/chat engine exactly as you do in handle_app_mention
-    process_conversation(client, event, text)
+# ========================================================================================================================
+   #For purpose combined event ToDo action item bot starting here
+    try:
+        if event.get("bot_id") or event.get("thread_ts") or (BOT_USER_ID and f"<@{BOT_USER_ID}>" in text):
+            return
+        if ("show my tasks" in t or "my tasks" in t or "show task" in t or "show tasks" in t):
+            show_user_tasks(user_id, channel_id, thread_ts, say)
+            return
 
+    except Exception as e:
+        logger.error(f"Error in message handler: {str(e)}", exc_info=True)
+        
+    #For ToDo action item bot ending here
+# ========================================================================================================================
+    # continue to RAG/chat
+    process_conversation(actual_client, event, text)
 
 @app.event("app_mention")
 
@@ -1504,7 +1515,7 @@ def handle_button_click(ack, body, client, logger):
     except Exception as e:
         logger.error(f"Error responding to button click: {e}")
 # ===============================================================================================================
-######ToDo action  item starting here
+######ToDo action  item event starting here
 @app.action(re.compile("task_checkbox_.*"))
 def handle_task_checkbox(ack, body, action,logger=None):
     ack()
@@ -1647,9 +1658,43 @@ def handle_claim_task_action(ack, body, client, logger=None):
             user=body.get("user", {}).get("id", ""),
             text=f"Error saving task: {str(e)}"
         )
+@app.action("select_tasks_to_delete")
+def handle_select_tasks_to_delete(ack, body, logger):
+    ack()
+    logger.info("Checkbox interaction received")
 
+@app.action("delete_selected_tasks")
+def handle_delete_selected_tasks(ack, body, client, say):
+    ack()
+    user_id = body["user"]["id"]
 
-######ToDo action  item ending here
+    # Find selected checkboxes
+    selected_tasks = []
+    for block in body["state"]["values"].values():
+        for action in block.values():
+            if action["type"] == "checkboxes":
+                selected_tasks = [opt["value"] for opt in action.get("selected_options", [])]
+
+    if not selected_tasks:
+        say(text="Please select at least one task to delete.", thread_ts=body["message"]["ts"])
+        return
+
+    # Delete tasks
+    deleted_count = 0
+    for task_id in selected_tasks:
+        deleted = delete_task(task_id)
+        if deleted:
+            deleted_count += 1
+
+    say(
+        text=f"Deleted {deleted_count} task(s).",
+        thread_ts=body["message"]["ts"]
+    )
+
+    # Refresh updated task list
+    show_user_tasks(user_id, body["channel"]["id"], body["message"]["ts"], say)
+
+######ToDo action  item event ending here
 # ===============================================================================================================
 
 if __name__=="__main__":
