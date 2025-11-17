@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import re
 import sys
+import os
 from datetime import datetime
 
 VERSION_FILE = "version.txt"
@@ -90,8 +91,11 @@ def main(commit_message):
     prepend_to_release_notes(release_note)
 
     # Output for GitHub Actions to use
-    print(f"::set-output name=new_version::{new_version}")
-    print(f"::set-output name=bump_type::{bump_type}")
+    github_output = os.getenv('GITHUB_OUTPUT')
+    if github_output:
+        with open(github_output, 'a') as f:
+            f.write(f"new_version={new_version}\n")
+            f.write(f"bump_type={bump_type}\n")
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:

@@ -14,7 +14,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}  # or PAT_TOKEN if needed
+          token: ${{ secrets.PAT_TOKEN }}  # or GITHUB_TOKEN if needed
           ref: automate-test-branch
           fetch-depth: 0  # Needed to get full commit history
 
@@ -38,8 +38,8 @@ jobs:
 
       - name: Configure Git
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Commit updated files
         run: |
@@ -50,9 +50,23 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Stage files
           git add version.txt release-note.md
-          git commit -m "chore: auto-bump to v${{ steps.bump.outputs.new_version }}" || echo "No changes to commit"
-          git push origin HEAD:automate-test-branch
+          
+          # Check if there are actual changes to commit
+          if ! git diff-index --quiet HEAD --; then
+            git commit -m "chore: auto-bump to v${{ steps.bump.outputs.new_version }}"
+            echo "✅ Changes committed. Pushing..."
+            
+            # Push to target branch (use PAT if GITHUB_TOKEN fails)
+            git push origin HEAD:automate-test-branch || {
+              echo "❌ Push failed. Branch may be protected. Consider using a PAT."
+              exit 1
+            }
+          else
+            echo "ℹ️ No file changes detected. Skipping commit & push."
+          fi
 
       # - name: Create Release (Optional)
       #   uses: actions/create-release@v1
