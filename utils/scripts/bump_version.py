@@ -74,6 +74,56 @@ def prepend_to_release_notes(note_content):
     with open(RELEASE_NOTE_FILE, 'w') as f:
         f.write(updated_content)
 
+def update_timeline_summary(new_version, subject):
+    from datetime import datetime
+
+    # Format date with non-breaking thin spaces (U+202F) to match existing style
+    now = datetime.now()
+    day = str(now.day)              # e.g., "17"
+    month = now.strftime("%b")      # e.g., "Nov"
+    year = str(now.year)            # e.g., "2025"
+
+    # Use \u202f (non-breaking thin space) — matches your existing entries
+    today = f"{day}\u202f{month}\u202f{year}"
+    timeline_entry = f"{today}\u202f→\u202fv{new_version}\u202f—\u202f{subject}"
+
+    try:
+        with open(RELEASE_NOTE_FILE, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        marker = "📅 **Timeline Summary (Visual Overview)**"
+        if marker not in content:
+            print("⚠️ Timeline marker not found. Skipping timeline update.")
+            return
+
+        parts = content.split(marker, 1)
+        header = parts[0] + marker
+        rest = parts[1]
+
+        # Find end of timeline block — just before first detailed release note
+        timeline_end_pos = rest.find("\n## ➕")
+        if timeline_end_pos == -1:
+            timeline_end_pos = len(rest)
+
+        timeline_block = rest[:timeline_end_pos]
+        after_block = rest[timeline_end_pos:]
+
+        # Insert new entry at TOP of timeline (reverse chronological)
+        if not timeline_block.strip().endswith('\n'):
+            timeline_block = timeline_block.rstrip('\n') + '\n'
+        timeline_block = timeline_entry + '\n' + timeline_block.lstrip('\n')
+
+        # Reconstruct file
+        updated_content = header + timeline_block + after_block
+
+        with open(RELEASE_NOTE_FILE, 'w', encoding='utf-8') as f:
+            f.write(updated_content)
+
+        print(f"📈 Timeline summary updated with: {timeline_entry}")
+
+    except Exception as e:
+        print(f"❌ Failed to update timeline: {e}")
+
 def main(commit_message):
     current_version, version_lines = read_version()
     print(f"📥 Current version: {current_version}")
@@ -91,6 +141,7 @@ def main(commit_message):
     update_version_file(version_lines, new_version)
     release_note = generate_release_note_section(new_version, subject, body)
     prepend_to_release_notes(release_note)
+    update_timeline_summary(new_version, subject)
     print(f"💾 Updated {VERSION_FILE} and {RELEASE_NOTE_FILE}")
 
     # Output for GitHub Actions to use
