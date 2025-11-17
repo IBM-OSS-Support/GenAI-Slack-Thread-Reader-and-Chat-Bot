@@ -15,6 +15,14 @@
 ---
 
 
+## ➕ v2.4.1 — Timeline adding issue fixed.
+📅 Nov 17  2025  
+
+### Highlights
+- Timeline adding issue fixed.
+
+---
+
 ## ➕ v2.4.0 — Updated release and bump files
 📅 Nov 17  2025  
 
