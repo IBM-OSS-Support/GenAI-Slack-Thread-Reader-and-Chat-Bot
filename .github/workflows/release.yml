@@ -49,6 +49,13 @@ jobs:
           echo "=== git diff ==="
           git diff
 
+      - name: Debug - Show top of Timeline section
+        run: |
+          echo "=== First 20 lines of release-note.md ==="
+          head -n 20 release-note.md
+          echo "=== Searching for timeline marker ==="
+          grep -A 5 "Timeline.*Summary" release-note.md
+
       - name: ⚙️ Configure Git
         run: |
           git config --global user.name "github-actions[bot]"
