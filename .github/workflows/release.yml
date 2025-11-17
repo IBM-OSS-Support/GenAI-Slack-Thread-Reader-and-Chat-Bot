@@ -3,7 +3,8 @@ name: Automated Release - GenAI Slack Thread Reader and Chat Bot
 on:
   push:
     branches:
-      - automate-test-branch
+      - main
+      - dev
   workflow_dispatch:
 
 permissions:
@@ -17,7 +18,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          ref: automate-test-branch
+          ref: dev
           fetch-depth: 0
 
       - name: 🐍 Set up Python 3.10
@@ -68,7 +69,7 @@ jobs:
           if ! git diff --cached --quiet; then
             git commit -m "chore: auto-bump to v${{ steps.bump.outputs.new_version }}"
             echo "✅ Changes committed. Pushing..."
-            git push origin HEAD:automate-test-branch
+            git push origin HEAD:dev
             echo "✅ Push successful!"
           else
             echo "ℹ️ No changes to commit."

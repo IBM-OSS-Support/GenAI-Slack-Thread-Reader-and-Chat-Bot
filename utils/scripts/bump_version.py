@@ -17,7 +17,7 @@ def read_version():
 
 def parse_commit_message(commit_msg):
     commit_msg = commit_msg.lower()
-    if "breaking change" in commit_msg or "major:" in commit_msg:
+    if "rel:" in commit_msg or "release:" in commit_msg:
         return "major"
     elif "feat:" in commit_msg or "feature:" in commit_msg:
         return "minor"

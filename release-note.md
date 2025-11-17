@@ -14,38 +14,6 @@
 
 ---
 
-
-## ➕ v2.4.1 — Timeline adding issue fixed.
-📅 Nov 17  2025  
-
-### Highlights
-- Timeline adding issue fixed.
-
----
-
-## ➕ v2.4.0 — Updated release and bump files
-📅 Nov 17  2025  
-
-### Highlights
-- Updated release and bump files
-
----
-
-## ➕ v2.3.2 — Added new function for updating timeline summary section
-📅 Nov 17  2025  
-
-### Highlights
-- Added new function for updating timeline summary section
-
----
-
-## ➕ v2.3.1 — Updated yml file
-📅 Nov 17  2025  
-
-### Highlights
-- Updated yml file
-
----
 ## ➕ v2.3.0 — Timeframe Analysis & Homepage Updates
 📅 Nov 14  2025  
 
@@ -295,4 +263,3 @@
 26 Sep 2025 → v2.2.0 — 365‑Day Innovation Reports
 07 Oct 2025 → v2.2.1 — Homepage Instructions
 14 Nov 2025 → v2.3.0 — Timeframe Analysis & Homepage Updates
-17 Nov 2025 → v2.4.1 — Timeline adding issue fixed.
