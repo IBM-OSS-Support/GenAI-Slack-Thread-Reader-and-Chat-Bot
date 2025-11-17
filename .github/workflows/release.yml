@@ -3,27 +3,29 @@ name: Automated Release - GenAI Slack Thread Reader and Chat Bot
 on:
   push:
     branches:
-      # - dev
       - automate-test-branch
-  workflow_dispatch:  # Allow manual trigger
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   bump-version:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: 🔄 Checkout code
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           ref: automate-test-branch
           fetch-depth: 0
 
-      - name: Set up Python
+      - name: 🐍 Set up Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
-      - name: Get latest commit message
+      - name: 📋 Get latest commit message
         id: commit
         run: |
           COMMIT_MSG=$(git log -1 --pretty=%B)
@@ -31,35 +33,39 @@ jobs:
           echo "$COMMIT_MSG" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
-      - name: Run version bump script
+      - name: 🔧 Run version bump script
         id: bump
         run: |
           python utils/scripts/bump_version.py "${{ env.COMMIT_MSG }}"
 
-      - name: Debug - Show file changes (Optional but helpful)
+      - name: 🔍 Debug - Show file changes
         run: |
-          echo "=== version.txt ==="
+          echo "=== version.txt content ==="
           cat version.txt
-          echo "=== release-note.md (last 10 lines) ==="
+          echo "=== Last 10 lines of release-note.md ==="
           tail -n 10 release-note.md
           echo "=== git status ==="
           git status
           echo "=== git diff ==="
           git diff
 
-      - name: Configure Git & Commit changes
+      - name: ⚙️ Configure Git
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add version.txt release-note.md
-          git commit -m "chore: auto-bump to v${{ steps.bump.outputs.new_version }}"
 
-      - name: Push changes to branch
+      - name: 📝 Commit & Push changes
         run: |
-          git push origin HEAD:automate-test-branch || {
-            echo "❌ Push failed. Branch may be protected. Consider using a PAT."
-            exit 1
-          }
+          git add version.txt release-note.md
+          
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: auto-bump to v${{ steps.bump.outputs.new_version }}"
+            echo "✅ Changes committed. Pushing..."
+            git push origin HEAD:automate-test-branch
+            echo "✅ Push successful!"
+          else
+            echo "ℹ️ No changes to commit."
+          fi
 
       # - name: Create Release (Optional)
       #   uses: actions/create-release@v1
