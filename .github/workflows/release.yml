@@ -33,7 +33,7 @@ jobs:
       - name: Run version bump script
         id: bump
         run: |
-          python scripts/bump_version.py "${{ env.COMMIT_MSG }}"
+          python utils/scripts/bump_version.py "${{ env.COMMIT_MSG }}"
 
       - name: Configure Git
         run: |
