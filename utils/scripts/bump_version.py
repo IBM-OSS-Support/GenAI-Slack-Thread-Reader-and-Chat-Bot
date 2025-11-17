@@ -76,14 +76,13 @@ def prepend_to_release_notes(note_content):
 
 def update_timeline_summary(new_version, subject):
     from datetime import datetime
+    import re
 
     # Format date with non-breaking thin spaces (U+202F) to match existing style
     now = datetime.now()
-    day = str(now.day)              # e.g., "17"
-    month = now.strftime("%b")      # e.g., "Nov"
-    year = str(now.year)            # e.g., "2025"
-
-    # Use \u202f (non-breaking thin space) — matches your existing entries
+    day = str(now.day)
+    month = now.strftime("%b")
+    year = str(now.year)
     today = f"{day}\u202f{month}\u202f{year}"
     timeline_entry = f"{today}\u202f→\u202fv{new_version}\u202f—\u202f{subject}"
 
@@ -97,11 +96,11 @@ def update_timeline_summary(new_version, subject):
             print(f"⚠️ Timeline marker '{marker}' not found. Skipping timeline update.")
             return
 
-        parts = content.split(marker, 1)
-        header = parts[0] + marker
-        rest = parts[1]
+        header_end = match.end()
+        header = content[:header_end]
+        rest = content[header_end:]
 
-        # Find end of timeline block — just before first detailed release note
+        # Find where timeline entries end (before first detailed release note)
         timeline_end_pos = rest.find("\n## ➕")
         if timeline_end_pos == -1:
             timeline_end_pos = len(rest)
@@ -119,7 +118,7 @@ def update_timeline_summary(new_version, subject):
             timeline_block += '\n'
         timeline_block += timeline_entry + '\n'
 
-        # Reconstruct file
+        # Reconstruct
         updated_content = header + timeline_block + after_block
 
         with open(RELEASE_NOTE_FILE, 'w', encoding='utf-8') as f:
