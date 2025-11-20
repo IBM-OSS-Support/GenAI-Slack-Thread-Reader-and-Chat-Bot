@@ -16,7 +16,9 @@ load_dotenv()
 from slack_sdk import WebClient
 
 # Import your DM utilities
-from helper.dm_utils import get_user_id_by_name_part, fetch_dm_messages_between_users, post_action_items_with_checkboxes_dm
+from helper.dm_utils import (get_user_id_by_name_part, 
+                            fetch_dm_messages_between_users, 
+                            post_action_items_with_checkboxes_dm,summarize_task_llm,parse_natural_deadline,is_duplicate_task)
 from helper.llm_utils import extract_action_items_llm
 from helper.utils import extract_deadline_from_text
 
@@ -51,9 +53,6 @@ for handler in logging.getLogger().handlers:
 
 logger = logging.getLogger(__name__)
 
-
-# haneesh:- use same environment variable names
-
 MODEL_TYPE = os.getenv("MODEL_TYPE", "ollama")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL")
 
@@ -61,7 +60,7 @@ app = App(token=os.getenv("SLACK_BOT_TOKEN"))
 
 print("Bot token:", os.getenv("SLACK_BOT_TOKEN"))
 
-
+# Get bot user ID dynamically
 try:
     BOT_USER_ID = app.client.auth_test()["user_id"]
     logger.info(f"Bot user ID: {BOT_USER_ID}")
@@ -178,7 +177,7 @@ def handle_channel_extraction(event, client):
         text = text.replace(f"<@{BOT_USER_ID}>", "").strip()
 
         # Parse channel extraction pattern
-        pattern = r"extract from\s+#?([\w\-]+)\s+(\d{4}-\d{2}-\d{2})\s+to\s+(\d{4}-\d{2}-\d{2})"
+        pattern = r"extract from\s+#?([\w\-]+)\s+(\d{4}-\d{2}-\d{2})\s+to\s+(\d{4}-\d{2}-\d{2})".strip()
         match = re.search(pattern, text, re.IGNORECASE)
         
         if not match:
@@ -524,7 +523,7 @@ def handle_dm_extraction(event, client):
 
         # Parse DM extraction pattern - updated to be more flexible
         # Supports both "extract dm between user1 user2" and "extract dm user1 user2"
-        pattern = r"extract dm (?:between\s+)?(\w+)\s+(\w+)(?:\s+from\s+(\d{4}-\d{2}-\d{2})\s+to\s+(\d{4}-\d{2}-\d{2}))?"
+        pattern = r"extract dm (?:between\s+)?(\w+)\s+(\w+)(?:\s+from\s+(\d{4}-\d{2}-\d{2})\s+to\s+(\d{4}-\d{2}-\d{2}))?".strip()
         match = re.search(pattern, text, re.IGNORECASE)
         
         if match:
@@ -604,23 +603,23 @@ def handle_dm_extraction(event, client):
                 return
 
             # Save tasks to DB
-            saved_count = 0
-            for item in action_items:
-                desc = item.get("action") or item.get("task") or item.get("description")
-                responsible = item.get("responsible", "")
-                deadline = item.get("deadline", "")
+            # saved_count = 0
+            # for item in action_items:
+            #     desc = item.get("action") or item.get("task") or item.get("description")
+            #     responsible = item.get("responsible", "")
+            #     deadline = item.get("deadline", "")
                 
-                if desc:
-                    save_task_to_db(
-                        user_id=user_id,
-                        user_name=responsible,
-                        task_description=desc,
-                        deadline=deadline,
-                        channel_id=f"dm_{user1_id}_{user2_id}",
-                        message_ts=None,
-                        original_thread_ts=None
-                    )
-                    saved_count += 1
+            #     if desc:
+            #         save_task_to_db(
+            #             user_id=user_id,
+            #             user_name=responsible,
+            #             task_description=desc,
+            #             deadline=deadline,
+            #             channel_id=f"dm_{user1_id}_{user2_id}",
+            #             message_ts=None,
+            #             original_thread_ts=None
+            #         )
+            #         saved_count += 1
 
             # Post tasks in user's DM with bot
             im_list = client.conversations_list(types="im")
@@ -675,11 +674,6 @@ def handle_dm_extraction(event, client):
             thread_ts=event_ts,
             text=f"Error extracting DM tasks: {str(e)}"
         )
-
-
-# haneesh: already available put clear condition for todo flow
-
-
 
 # Main app mention handler
 @app.event("app_mention")
@@ -807,9 +801,6 @@ def handle_delete_selected_tasks(ack, body, client, say):
     # Refresh updated task list
     show_user_tasks(user_id, body["channel"]["id"], body["message"]["ts"], say)
 
-
-
-# haneesh:- handler already there need to put condition to redirect to todo flow, normal flow should work fine as a regular chat bot
 @app.event("message")
 def handle_message_events(body, say, logger):
     """Handle direct channel messages"""
@@ -898,20 +889,22 @@ def handle_task_checkbox(ack, body, action):
             text=f"Error claiming task. Please try again."
         )
 
-
-# haneesh:- not needed aready there
 @app.event("app_home_opened")
 def handle_app_home_opened_events(body, logger):
     logger.info(body)
 
 
+#This is for DM
 @app.action("claim_task_action")
 def handle_claim_task_action(ack, body, client, logger):
     """
     Triggered when user clicks a 'Claim Task' checkbox.
-    Saves the claimed task to DB and notifies user.
+    Includes:
+    - Natural language deadline extraction
+    - LLM summarization
+    - Duplicate task prevention
     """
-    ack()  # Must always ACK first to avoid timeout
+    ack()
 
     try:
         user_id = body["user"]["id"]
@@ -920,64 +913,79 @@ def handle_claim_task_action(ack, body, client, logger):
 
         channel_id = body["channel"]["id"]
         message_ts = body["message"]["ts"]
-        original_thread_ts = body.get("container", {}).get("thread_ts", None)
+        original_thread_ts = body.get("container", {}).get("thread_ts")
 
-        selected = body["actions"][0].get("selected_options", [])
-        if not selected:
+        action = body["actions"][0]
+
+        # Slack sends all selected options every time → find only newly selected
+        selected = [opt["value"] for opt in action.get("selected_options", [])]
+        previous = [opt["value"] for opt in action.get("initial_options", [])] if action.get("initial_options") else []
+        new_selection = list(set(selected) - set(previous))
+
+        if not new_selection:
+            return
+        
+        raw_value = new_selection[0]
+
+        # Format: responsible|task_text|deadline_text
+        parts = raw_value.split("|")
+        responsible = parts[0].strip() or user_name
+        raw_task_text = parts[1].strip()
+        raw_deadline_text = parts[2].strip()
+
+        # ---------------------------------------------------------
+        # 1) LLM Summarization (clean task into crisp actionable text)
+        # ---------------------------------------------------------
+        summarized_task = summarize_task_llm(raw_task_text)
+
+        # ---------------------------------------------------------
+        # 2) Natural Language Deadline Extraction
+        # ---------------------------------------------------------
+        deadline = parse_natural_deadline(raw_deadline_text)
+
+        # ---------------------------------------------------------
+        # 3) Duplicate Prevention
+        # ---------------------------------------------------------
+        if is_duplicate_task(user_id, summarized_task):
+            client.chat_postEphemeral(
+                channel=channel_id,
+                user=user_id,
+                text=f"⚠️ This task already exists:\n*{summarized_task}*"
+            )
             return
 
-        # Get the value directly instead of parsing as JSON
-        value = selected[0]["value"]
-        
-        # Parse the pipe-separated values (same format as used in post_action_items_with_checkboxes)
-        if "|" in value:
-            parts = value.split("|")
-            if len(parts) >= 3:
-                responsible = parts[0]
-                task_description = parts[1]
-                deadline = parts[2] if len(parts) > 2 else ""
-            else:
-                # Fallback if format doesn't match expected
-                responsible = user_name
-                task_description = value
-                deadline = ""
-        else:
-            # If it's not pipe-separated, use the whole value as task description
-            responsible = user_name
-            task_description = value
-            deadline = ""
-
-        # Save task into DB
+        # ---------------------------------------------------------
+        # 4) Save to DB
+        # ---------------------------------------------------------
         task_id = save_task_to_db(
             user_id=user_id,
             user_name=user_name,
-            task_description=task_description,
-            deadline=deadline if deadline and deadline != "No Deadline" else None,
+            task_description=summarized_task,
+            deadline=deadline,
             channel_id=channel_id,
             message_ts=message_ts,
             original_thread_ts=original_thread_ts,
         )
 
-        if task_id:
-            client.chat_postEphemeral(
-                channel=channel_id,
-                user=user_id,
-                text=f"Task '{task_description}' saved to DB by {user_name} (Task ID: {task_id})"
+        client.chat_postEphemeral(
+            channel=channel_id,
+            user=user_id,
+            text=(
+                f"✅ *Task Claimed*\n"
+                f"*Task:* {summarized_task}\n"
+                f"*Deadline:* {deadline or 'No Deadline'}\n"
+                f"*Task ID:* `{task_id}`"
             )
-        else:
-            client.chat_postEphemeral(
-                channel=channel_id,
-                user=user_id,
-                text=f"Failed to save task '{task_description}'."
-            )
+        )
 
     except Exception as e:
-        logger.error(f"Error handling task claim: {e}", exc_info=True)
+        logger.error(f"Error handling claim task: {e}", exc_info=True)
         client.chat_postEphemeral(
-            channel=body["channel"]["id"],
-            user=body["user"]["id"],
+            channel=body.get("channel", {}).get("id", ""),
+            user=body.get("user", {}).get("id", ""),
             text=f"Error saving task: {str(e)}"
         )
+
 
 @app.command("/extract_all_tasks")
 def extract_all_tasks_command(ack, command, respond):
@@ -1226,9 +1234,6 @@ def show_user_tasks(user_id, channel_id, thread_ts, say=None):
                 text=error_message
             )
 
-
-
-# haneesh :  already there
 if __name__ == "__main__":
     logger.info("Starting Slack bot with channel, thread, and DM extraction features...")
     try:

@@ -4,6 +4,10 @@ from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 import os
 import time
+import dateparser
+from datetime import datetime
+from helper.llm_utils import llama_infer
+from db import get_user_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -12,6 +16,58 @@ client = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
 # Cache to avoid redundant API calls
 USER_CACHE = {}
 DM_CHANNEL_CACHE = {}
+
+def is_duplicate_task(user_id, task_description):
+    """
+    Return True if same user already has a task with similar text.
+    """
+    existing = get_user_tasks(user_id)
+
+    task_lower = task_description.lower()
+
+    for t in existing:
+        desc = t[1].lower()   # index 1 = task_description
+        if task_lower == desc or task_lower in desc or desc in task_lower:
+            return True
+    return False
+
+def parse_natural_deadline(deadline_text):
+    if not deadline_text or deadline_text.lower() == "no deadline":
+        return None
+    
+    parsed = dateparser.parse(deadline_text, settings={"PREFER_DATES_FROM": "future"})
+    if parsed:
+        return parsed.strftime("%Y-%m-%d")
+    
+    return None
+
+def summarize_task_llm(text):
+    prompt = f"""
+You are an assistant that rewrites messy or incomplete text into a **single, clear, actionable task sentence**.
+
+Your rules:
+- Produce **only ONE short sentence**.
+- No bullets, no numbering, no lists.
+- No extra commentary.
+- Fix grammar and make it professional.
+- Do NOT add additional steps or expand it into a multi-step process.
+- Only rewrite the user's text into a clean, concise action.
+
+Original text:
+{text}
+
+Respond with ONLY the cleaned one-line task.
+"""
+    result = llama_infer(prompt).strip()
+
+    # Safety: keep only the first non-empty line
+    first_line = next((line.strip() for line in result.split("\n") if line.strip()), "")
+
+    # Remove bullet symbols or numbering if any survived
+    cleaned = first_line.lstrip("*-1234567890. ").strip()
+
+    return cleaned
+
 
 def slack_api_call_with_retry(method, **kwargs):
     """Wrapper to handle Slack rate limits gracefully."""
@@ -108,22 +164,23 @@ def post_action_items_with_checkboxes_dm(client, channel, tasks, thread_ts=None,
         blocks = [
             {
                 "type": "header",
-                "text": {"type": "plain_text", "text": f"?? Extracted Tasks ({context})"}
+                "text": {"type": "plain_text", "text": f"📌 Extracted Tasks ({context})"}
             }
         ]
 
         for idx, t in enumerate(tasks):
             task_text = (t.get("action") or t.get("task") or t.get("description", "")).strip()
             responsible = (t.get("responsible") or "").strip()
-            deadline = (t.get("deadline") or "").strip()
+            deadline = (t.get("deadline") or "").strip() or "No Deadline"
 
             # Truncate text to be safe for Slack limits
-            safe_task_text = (task_text[:250] + "") if len(task_text) > 250 else task_text
+            safe_task_text = (task_text[:250] + "…") if len(task_text) > 250 else task_text
             safe_responsible = responsible[:50]
             safe_deadline = deadline[:50]
 
-            # Slack requires value to be a string = 2000 chars
-            value_str = f"task_{idx}_{safe_responsible or 'unassigned'}"
+            # ✔ FIX: Correct value format for parsing in action handler
+            # Format: responsible|task_description|deadline
+            value_str = f"{safe_responsible}|{safe_task_text}|{safe_deadline}"
 
             section_text = f"*{safe_task_text}*"
             if safe_responsible:
@@ -153,7 +210,7 @@ def post_action_items_with_checkboxes_dm(client, channel, tasks, thread_ts=None,
             thread_ts=thread_ts,
         )
 
-        logger.info(f"? Tasks posted successfully in {context}.")
+        logger.info(f"Tasks posted successfully in {context}.")
         return response
 
     except SlackApiError as e:
@@ -161,3 +218,4 @@ def post_action_items_with_checkboxes_dm(client, channel, tasks, thread_ts=None,
         logger.debug(f"Failed blocks payload:\n{json.dumps(blocks, indent=2)}")
     except Exception as e:
         logger.error(f"Error posting tasks: {str(e)}", exc_info=True)
+
