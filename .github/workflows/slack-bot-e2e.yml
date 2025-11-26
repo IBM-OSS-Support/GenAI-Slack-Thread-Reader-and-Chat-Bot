@@ -1,0 +1,45 @@
+name: Slack Bot E2E Tests
+
+on:
+  # Manual trigger only (for now)
+  workflow_dispatch:
+
+jobs:
+  slack-bot-tests:
+    runs-on: ubuntu-latest
+
+    env:
+      # Passed to test_bot.py via environment
+      SLACK_USER_TOKEN: ${{ secrets.SLACK_USER_TOKEN }}
+      BOT_USER_ID: ${{ secrets.BOT_USER_ID }}
+      THREAD_URL: ${{ secrets.THREAD_URL }}
+      CHANNEL_NAME: ${{ secrets.CHANNEL_NAME }}
+      MENTION_CHANNEL_NAME: ${{ secrets.MENTION_CHANNEL_NAME }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # If you have requirements.txt, use that:
+          # pip install -r requirements.txt
+          # Otherwise, install directly:
+          pip install slack_sdk tenacity rich
+
+      - name: Run Slack bot E2E tests
+        run: |
+          python test_bot.py \
+            --bot-user-id "$BOT_USER_ID" \
+            --thread-url "$THREAD_URL" \
+            --channel-name "$CHANNEL_NAME" \
+            --mention-channel-name "$MENTION_CHANNEL_NAME" \
+            --pdf-path "tests/data/insurance.pdf" \
+            --excel-path "tests/data/Rakesh.xlsx" \
+            --image-pdf-path "tests/data/insurance-image-only.pdf"
