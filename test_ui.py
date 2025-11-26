@@ -1,0 +1,228 @@
+#!/usr/bin/env python
+"""
+Rich TUI wrapper for test_bot.py.
+
+Features:
+- Runs test_bot.py as a subprocess (so you don't have to rewrite your tests)
+- Parses its stdout in real time
+- Treats any "=== ... ===" line as a logical test section
+- Tracks each section's status (Pending / Running / Passed / Failed)
+- Shows a live table of test progress
+- Shows a scrolling log of recent output
+"""
+
+import argparse
+import subprocess
+import sys
+import re
+from typing import Dict, List, Optional
+
+from rich.console import Console, Group
+from rich.live import Live
+from rich.table import Table
+from rich.panel import Panel
+from rich.text import Text
+
+console = Console()
+
+# Matches lines like: "=== Thread analysis + follow-up (DM) ==="
+# or "=== PDF upload + Q&A (FU-03, channel @mention) ==="
+TEST_LINE_RE = re.compile(r"^===\s*(.+?)\s*===$")
+
+STATUS_PENDING = "pending"
+STATUS_RUNNING = "running"
+STATUS_PASSED = "passed"
+STATUS_FAILED = "failed"
+
+
+class TestState:
+    def __init__(self, name: str):
+        self.name = name
+        self.status = STATUS_PENDING
+        self.details: List[str] = []
+        self.had_pass = False
+        self.had_fail = False
+
+
+class RunState:
+    def __init__(self):
+        self.tests: Dict[int, TestState] = {}
+        self.current_test: Optional[int] = None
+        self.logs: List[str] = []
+        self.exit_code: Optional[int] = None
+        self.next_index: int = 1  # auto-increment for each new "===" section
+
+    def ensure_test(self, index: int, name: str):
+        if index not in self.tests:
+            self.tests[index] = TestState(name)
+
+    def start_test(self, index: int, name: str):
+        # Finalize previous test, if any
+        if self.current_test is not None:
+            self.finalize_test(self.current_test)
+
+        self.ensure_test(index, name)
+        self.current_test = index
+        t = self.tests[index]
+        t.status = STATUS_RUNNING
+        t.had_pass = False
+        t.had_fail = False
+
+    def mark_pass_marker(self):
+        if self.current_test is None:
+            return
+        t = self.tests[self.current_test]
+        t.had_pass = True
+        # status will be finalized at end of section
+
+    def mark_fail_marker(self):
+        if self.current_test is None:
+            return
+        t = self.tests[self.current_test]
+        t.had_fail = True
+        t.status = STATUS_FAILED
+
+    def finalize_test(self, index: int):
+        t = self.tests.get(index)
+        if not t:
+            return
+        if t.had_fail:
+            t.status = STATUS_FAILED
+        else:
+            if t.had_pass:
+                t.status = STATUS_PASSED
+            else:
+                # section ran but no ✅ or ❌ markers => treat as failed/unknown
+                t.status = STATUS_FAILED
+
+    def finalize_all(self):
+        if self.current_test is not None:
+            self.finalize_test(self.current_test)
+
+
+def parse_forwarded_args() -> List[str]:
+    """
+    Capture all CLI args (including --bot-user-id, --thread-url, --pdf-path, etc.)
+    and pass them straight through to test_bot.py.
+    """
+    parser = argparse.ArgumentParser(add_help=False)
+    _, unknown = parser.parse_known_args()
+    return unknown
+
+
+def make_status_table(state: RunState) -> Table:
+    table = Table(title="Slack Bot Test Progress")
+    table.add_column("#", style="bold", justify="right")
+    table.add_column("Test Section")
+    table.add_column("Status")
+
+    if not state.tests:
+        table.add_row("-", "Waiting for tests to start…", "")
+        return table
+
+    for idx in sorted(state.tests.keys()):
+        t = state.tests[idx]
+        if t.status == STATUS_PENDING:
+            status_text = Text("⏳ Pending", style="yellow")
+        elif t.status == STATUS_RUNNING:
+            status_text = Text("▶️ Running", style="cyan")
+        elif t.status == STATUS_PASSED:
+            status_text = Text("✅ Passed", style="green")
+        elif t.status == STATUS_FAILED:
+            status_text = Text("❌ Failed", style="red")
+        else:
+            status_text = Text(t.status)
+
+        table.add_row(str(idx), t.name, status_text)
+
+    return table
+
+
+def make_log_panel(state: RunState, max_lines: int = 40) -> Panel:
+    recent = state.logs[-max_lines:]
+    if not recent:
+        body = Text("No output yet…", style="dim")
+    else:
+        body = Text("\n".join(recent))
+
+    title = "Live Output"
+    if state.exit_code is not None:
+        title += f" (exit code: {state.exit_code})"
+
+    return Panel(body, title=title, border_style="blue")
+
+
+def render(state: RunState):
+    table = make_status_table(state)
+    log_panel = make_log_panel(state)
+    return Group(table, log_panel)
+
+
+def update_state_from_line(state: RunState, line: str):
+    stripped = line.strip()
+
+    # Section header line, e.g. "=== Thread analysis + follow-up (DM) ==="
+    m = TEST_LINE_RE.match(stripped)
+    if m:
+        name = m.group(1)
+        index = state.next_index
+        state.next_index += 1
+        state.start_test(index, name)
+        return
+
+    # Success / failure markers – any line containing ✅ or ❌
+    if "❌" in stripped:
+        state.mark_fail_marker()
+    elif "✅" in stripped:
+        state.mark_pass_marker()
+
+
+def main():
+    forwarded_args = parse_forwarded_args()
+
+    # Run test_bot.py in UNBUFFERED mode so we see prints live (-u)
+    cmd = [sys.executable, "-u", "test_bot1.py"] + forwarded_args
+
+    state = RunState()
+
+    console.print(f"[bold]Running:[/bold] {' '.join(cmd)}\n")
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,  # line-buffered
+    )
+
+    if not proc.stdout:
+        console.print("[red]Failed to capture stdout from test_bot.py[/red]")
+        sys.exit(1)
+
+    with Live(render(state), refresh_per_second=10, console=console) as live:
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            state.logs.append(line)
+            update_state_from_line(state, line)
+            live.update(render(state))
+
+        proc.wait()
+        state.exit_code = proc.returncode
+        # finalize last section
+        state.finalize_all()
+        live.update(render(state))
+
+    console.print()
+
+    if proc.returncode == 0:
+        console.print("[bold green]🎉 All tests passed (exit code 0).[/bold green]")
+    else:
+        console.print(
+            f"[bold red]Some tests failed or script errored (exit code {proc.returncode}).[/bold red]"
+        )
+
+    sys.exit(proc.returncode)
+
+
+if __name__ == "__main__":
+    main()
