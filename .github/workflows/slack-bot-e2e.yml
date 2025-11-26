@@ -35,7 +35,7 @@ jobs:
 
       - name: Run Slack bot E2E tests
         run: |
-          python test_bot.py \
+          python test_ui.py \
             --bot-user-id "$BOT_USER_ID" \
             --thread-url "$THREAD_URL" \
             --channel-name "$CHANNEL_NAME" \
