@@ -11,7 +11,16 @@ from db import get_user_tasks
 
 logger = logging.getLogger(__name__)
 
-client = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
+TEAM_BOT_TOKENS = {
+    os.getenv("TEAM1_ID"): os.getenv("TEAM1_BOT_TOKEN"),
+    os.getenv("TEAM2_ID"): os.getenv("TEAM2_BOT_TOKEN"),
+}
+
+# Get default token (fallback to TEAM2 if TEAM1 not available)
+DEFAULT_TEAM_ID = os.getenv("TEAM1_ID") or os.getenv("TEAM2_ID")
+SLACK_BOT_TOKEN = os.getenv("TEAM1_BOT_TOKEN") or os.getenv("TEAM2_BOT_TOKEN")
+client = WebClient(token=SLACK_BOT_TOKEN)
+
 
 # Cache to avoid redundant API calls
 USER_CACHE = {}

@@ -22,7 +22,16 @@ from helper.dm_utils import (get_user_id_by_name_part,
 from helper.llm_utils import extract_action_items_llm
 from helper.utils import extract_deadline_from_text
 
-client = WebClient(token=os.getenv("SLACK_BOT_TOKEN"))
+#Multi-team token configuration
+TEAM_BOT_TOKENS = {
+    os.getenv("TEAM1_ID"): os.getenv("TEAM1_BOT_TOKEN"),
+    os.getenv("TEAM2_ID"): os.getenv("TEAM2_BOT_TOKEN"),
+}
+
+# Get default token (fallback to TEAM2 if TEAM1 not available)
+DEFAULT_TEAM_ID = os.getenv("TEAM1_ID") or os.getenv("TEAM2_ID")
+SLACK_BOT_TOKEN = os.getenv("TEAM1_BOT_TOKEN") or os.getenv("TEAM2_BOT_TOKEN")
+client = WebClient(token=SLACK_BOT_TOKEN)
 resp = client.auth_test()
 print(resp)
 
@@ -56,9 +65,9 @@ logger = logging.getLogger(__name__)
 MODEL_TYPE = os.getenv("MODEL_TYPE", "ollama")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL")
 
-app = App(token=os.getenv("SLACK_BOT_TOKEN"))
+app = App(token=SLACK_BOT_TOKEN)
 
-print("Bot token:", os.getenv("SLACK_BOT_TOKEN"))
+print("Bot token:",(SLACK_BOT_TOKEN))
 
 # Get bot user ID dynamically
 try:
@@ -675,37 +684,7 @@ def handle_dm_extraction(event, client):
             text=f"Error extracting DM tasks: {str(e)}"
         )
 
-# Main app mention handler
-@app.event("app_mention")
-def handle_app_mention(event, say, client):
-    """
-    Handle app mentions for channel, thread, and DM extraction
-    """
-    text = event.get("text", "")
-    channel_id = event.get("channel")
-    thread_ts = event.get("thread_ts")
-    event_ts = event.get("ts")
-    
-    # Check for DM extraction
-    if "extract dm between" in text.lower():
-        handle_dm_extraction(event, client)
-    # Check for channel extraction
-    elif "extract from" in text and "from" in text and "to" in text:
-        handle_channel_extraction(event, client)
-    # Check for thread extraction
-    elif thread_ts:
-        handle_thread_extraction(event, client)
-    else:
-        # Default response with all options
-        response_ts = thread_ts or event_ts
-        client.chat_postMessage(
-            channel=channel_id,
-            thread_ts=response_ts,
-            text="I can help you extract tasks from:\n\n"
-                "• *Channels*: `@Todo Assistant extract from channel_name from YYYY-MM-DD to YYYY-MM-DD`\n"
-                "• *Threads*: Mention me in any thread\n"
-                "• *DMs*: `@Todo Assistant extract dm between user1 user2 from YYYY-MM-DD to YYYY-MM-DD`"
-        )
+
 
 # Keep all your existing functions below (show_user_tasks, post_action_items_with_checkboxes, action handlers, etc.)
 def post_action_items_with_checkboxes(app, action_items, channel_id, thread_ts, source_channel=None):
@@ -764,356 +743,22 @@ def post_action_items_with_checkboxes(app, action_items, channel_id, thread_ts, 
         logger.error(f"Error posting action items: {str(e)}", exc_info=True)
         raise
 
-# ... [Keep all your existing action handlers, command handlers, etc.]
-@app.action("select_tasks_to_delete")
-def handle_select_tasks_to_delete(ack, body, logger):
-    ack()
-    logger.info("Checkbox interaction received")
-
-@app.action("delete_selected_tasks")
-def handle_delete_selected_tasks(ack, body, client, say):
-    ack()
-    user_id = body["user"]["id"]
-
-    # Find selected checkboxes
-    selected_tasks = []
-    for block in body["state"]["values"].values():
-        for action in block.values():
-            if action["type"] == "checkboxes":
-                selected_tasks = [opt["value"] for opt in action.get("selected_options", [])]
-
-    if not selected_tasks:
-        say(text="Please select at least one task to delete.", thread_ts=body["message"]["ts"])
-        return
-
-    # Delete tasks
-    deleted_count = 0
-    for task_id in selected_tasks:
-        deleted = delete_task(task_id)
-        if deleted:
-            deleted_count += 1
-
-    say(
-        text=f"Deleted {deleted_count} task(s).",
-        thread_ts=body["message"]["ts"]
-    )
-
-    # Refresh updated task list
-    show_user_tasks(user_id, body["channel"]["id"], body["message"]["ts"], say)
-
-@app.event("message")
-def handle_message_events(body, say, logger):
-    """Handle direct channel messages"""
-    try:
-        event = body.get("event", {})
-        text = event.get("text", "").lower()
-        user_id = event.get("user")
-        channel_id = event.get("channel")
-        
-        # Skip bot messages, thread messages, and bot mentions
-        if event.get("bot_id") or event.get("thread_ts") or (BOT_USER_ID and f"<@{BOT_USER_ID}>" in text):
-            return
-        
-        # Check for task-related commands
-        if "show my tasks" in text or "my tasks" in text or "show task" in text or "show tasks" in text:
-            show_user_tasks(user_id, channel_id, None, say)
-            return
-            
-    except Exception as e:
-        logger.error(f"Error in message handler: {str(e)}", exc_info=True)
-
-@app.action(re.compile("task_checkbox_.*"))
-def handle_task_checkbox(ack, body, action):
-    """Handle checkbox selection for tasks - save to DB only if user matches"""
-    ack()
-    try:
-        user_id = body["user"]["id"]
-        channel_id = body["channel"]["id"]
-        message_ts = body["message"]["ts"]
-
-        # Get logged-in user info
-        user_info = app.client.users_info(user=user_id)
-        user_name = user_info["user"]["profile"].get("display_name") or user_info["user"]["profile"].get("real_name") or user_info["user"]["name"]
-
-        # Decode structured value
-        selected = action.get("selected_options", [])
-        if not selected:
-            return
-
-        value = selected[0]["value"]
-        assigned_user, task_description, deadline = value.split("|")
-
-        # Check if logged-in user matches the assigned user
-        if assigned_user.lower() != user_name.lower():
-            app.client.chat_postEphemeral(
-                channel=channel_id,
-                user=user_id,
-                text=f"Only {assigned_user} can claim this task."
-            )
-            return
-        
-        # Check for existing task (prevent duplicates)
-        if check_existing_task(user_id, task_description):
-            app.client.chat_postEphemeral(
-                channel=channel_id,
-                user=user_id,
-                text=f"You already claimed this task: {task_description}"
-            )
-            logger.info(f"Duplicate task prevented for user={user_name}: {task_description}")
-            return
-        
-        # Save into DB - only if user matches
-        task_id = save_task_to_db(
-            user_id=user_id,
-            user_name=user_name,
-            task_description=task_description,
-            deadline=None if deadline == "No Deadline" else deadline,
-            channel_id=channel_id,
-            message_ts=message_ts,
-            original_thread_ts=None
-        )
-
-        if task_id:
-            app.client.chat_postMessage(
-                channel=channel_id,
-                thread_ts=message_ts,
-                text=f"Task claimed by {user_name}\nTask: {task_description}\nDeadline: {deadline}\nTask ID: {task_id}"
-            )
-            logger.info(f"Task claimed successfully: ID={task_id}, User={user_name}")
-
-    except Exception as e:
-        logger.error(f"Error handling checkbox: {str(e)}", exc_info=True)
-        app.client.chat_postEphemeral(
-            channel=channel_id,
-            user=user_id,
-            text=f"Error claiming task. Please try again."
-        )
-
-@app.event("app_home_opened")
-def handle_app_home_opened_events(body, logger):
-    logger.info(body)
+# ... 
 
 
-#This is for DM
-@app.action("claim_task_action")
-def handle_claim_task_action(ack, body, client, logger):
-    """
-    Triggered when user clicks a 'Claim Task' checkbox.
-    Includes:
-    - Natural language deadline extraction
-    - LLM summarization
-    - Duplicate task prevention
-    """
-    ack()
-
-    try:
-        user_id = body["user"]["id"]
-        user_info = client.users_info(user=user_id)
-        user_name = user_info["user"]["profile"]["real_name"]
-
-        channel_id = body["channel"]["id"]
-        message_ts = body["message"]["ts"]
-        original_thread_ts = body.get("container", {}).get("thread_ts")
-
-        action = body["actions"][0]
-
-        # Slack sends all selected options every time → find only newly selected
-        selected = [opt["value"] for opt in action.get("selected_options", [])]
-        previous = [opt["value"] for opt in action.get("initial_options", [])] if action.get("initial_options") else []
-        new_selection = list(set(selected) - set(previous))
-
-        if not new_selection:
-            return
-        
-        raw_value = new_selection[0]
-
-        # Format: responsible|task_text|deadline_text
-        parts = raw_value.split("|")
-        responsible = parts[0].strip() or user_name
-        raw_task_text = parts[1].strip()
-        raw_deadline_text = parts[2].strip()
-
-        # ---------------------------------------------------------
-        # 1) LLM Summarization (clean task into crisp actionable text)
-        # ---------------------------------------------------------
-        summarized_task = summarize_task_llm(raw_task_text)
-
-        # ---------------------------------------------------------
-        # 2) Natural Language Deadline Extraction
-        # ---------------------------------------------------------
-        deadline = parse_natural_deadline(raw_deadline_text)
-
-        # ---------------------------------------------------------
-        # 3) Duplicate Prevention
-        # ---------------------------------------------------------
-        if is_duplicate_task(user_id, summarized_task):
-            client.chat_postEphemeral(
-                channel=channel_id,
-                user=user_id,
-                text=f"⚠️ This task already exists:\n*{summarized_task}*"
-            )
-            return
-
-        # ---------------------------------------------------------
-        # 4) Save to DB
-        # ---------------------------------------------------------
-        task_id = save_task_to_db(
-            user_id=user_id,
-            user_name=user_name,
-            task_description=summarized_task,
-            deadline=deadline,
-            channel_id=channel_id,
-            message_ts=message_ts,
-            original_thread_ts=original_thread_ts,
-        )
-
-        client.chat_postEphemeral(
-            channel=channel_id,
-            user=user_id,
-            text=(
-                f"✅ *Task Claimed*\n"
-                f"*Task:* {summarized_task}\n"
-                f"*Deadline:* {deadline or 'No Deadline'}\n"
-                f"*Task ID:* `{task_id}`"
-            )
-        )
-
-    except Exception as e:
-        logger.error(f"Error handling claim task: {e}", exc_info=True)
-        client.chat_postEphemeral(
-            channel=body.get("channel", {}).get("id", ""),
-            user=body.get("user", {}).get("id", ""),
-            text=f"Error saving task: {str(e)}"
-        )
 
 
-@app.command("/extract_all_tasks")
-def extract_all_tasks_command(ack, command, respond):
-    """
-    Slash command to extract tasks from all DMs.
-    Usage: /extract_all_tasks 2025-01-01 2025-01-31
-    """
-    ack()
-    
-    try:
-        # Parse dates from command text
-        parts = command["text"].strip().split()
-        if len(parts) != 2:
-            respond("Usage: /extract_all_tasks YYYY-MM-DD YYYY-MM-DD")
-            return
-        
-        start_date, end_date = parts
-        
-        # Validate dates
-        try:
-            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-            if start_dt > end_dt:
-                respond("Start date cannot be after end date.")
-                return
-        except ValueError:
-            respond("Invalid date format. Use YYYY-MM-DD.")
-            return
-        
-        respond(f"Extracting tasks from all DMs ({start_date} to {end_date})... This may take a moment...")
-        
-        # Since we removed the old DM extraction, inform user about new method
-        respond("DM extraction is now available via: @Todo Assistant extract dm between user1 user2 from YYYY-MM-DD to YYYY-MM-DD")
-        
-    except Exception as e:
-        logger.error(f"Error in extract_all_tasks_command: {e}", exc_info=True)
-        respond(f"Error: {e}")
 
-@app.command("/show_tasks")
-def show_tasks_command(ack, command, respond):
-    """Slash command to show user's tasks"""
-    ack()
-    user_id = command["user_id"]
-    channel_id = command["channel_id"]
-    
-    try:
-        show_user_tasks(user_id, channel_id, None)
-        respond("Displaying your tasks...")
-    except Exception as e:
-        logger.error(f"Error in show_tasks_command: {str(e)}", exc_info=True)
-        respond("Error loading tasks. Please try again.")
 
-@app.command("/help")
-def help_command(ack, command, respond):
-    """Slash command to show help"""
-    ack()
-    
-    help_text = """
-Todo Assistant Help
 
-Available Commands:
-/show_tasks - Show your pending tasks
-/help - Show this help message
 
-Channel Extraction:
-Mention me with: @Todo Assistant extract from channel_name from YYYY-MM-DD to YYYY-MM-DD
-Example: @Todo Assistant extract from general from 2025-10-01 to 2025-10-31
 
-Thread Extraction:
-Mention me in any thread to extract tasks from that conversation
 
-DM Extraction:
-Mention me with: @Todo Assistant extract dm between user1 user2 from YYYY-MM-DD to YYYY-MM-DD
-Example: @Todo Assistant extract dm between sanjay hari from 2025-10-01 to 2025-10-31
 
-Task Management:
-Say "show my tasks" in any channel to see your tasks
-Click checkboxes to claim tasks
-Use the delete button to remove completed tasks
 
-Need more help? Contact the administrator.
-"""
-    
-    respond(help_text)
 
-@app.command("/extract_dm")
-def extract_dm_command(ack, command, respond):
-    """Slash command for DM extraction"""
-    ack()
-    
-    help_text = """
-DM Extraction Usage:
 
-Via mention:
-@Todo Assistant extract dm between user1 user2 from YYYY-MM-DD to YYYY-MM-DD
 
-Examples:
-@Todo Assistant extract dm between sanjay hari
-@Todo Assistant extract dm between alice bob from 2025-10-01 to 2025-10-31
-
-Note: If no dates are provided, last 30 days will be used.
-"""
-    
-    respond(help_text)
-
-@app.command("/extract_channel")
-def extract_channel_command(ack, command, respond):
-    """Slash command for channel extraction"""
-    ack()
-    
-    help_text = """
-Channel Extraction Usage:
-
-Via mention:
-@Todo Assistant extract from channel_name from YYYY-MM-DD to YYYY-MM-DD
-
-Examples:
-@Todo Assistant extract from general from 2025-10-01 to 2025-10-31
-@Todo Assistant extract from project-updates from 2025-09-01 to 2025-09-30
-"""
-    
-    respond(help_text)
-
-# Error handler
-@app.error
-def global_error_handler(error, body, logger):
-    logger.error(f"Error: {error}")
-    logger.error(f"Request body: {body}")
 
 def show_user_tasks(user_id, channel_id, thread_ts, say=None):
     """Show all pending tasks for user in an interactive list with checkboxes to delete selected tasks"""
