@@ -17,7 +17,7 @@ jobs:
 
     steps:
       - name: Clean workspace
-        run: rm -rf * .??* || true
+        run: rm -rf ./* || true      
 
       - name: Checkout selected branch
         uses: actions/checkout@v3
@@ -33,21 +33,18 @@ jobs:
           MAIN_VERSION=$(grep '^version_main:' version.txt | awk '{print $2}')
           DEV_VERSION=$(grep  '^version_dev:'  version.txt | awk '{print $2}')
 
-          # dev environment
           if [ "$ENV" = "dev" ]; then
             VERSION="$DEV_VERSION"
             NAMESPACE="dev"
             DEPLOY_DIR="deploy-dev"
             DEPLOYMENT_NAME="asksupport-bot-dev"
 
-          # main environment
           elif [ "$ENV" = "main" ]; then
             VERSION="$MAIN_VERSION"
             NAMESPACE="llm"
             DEPLOY_DIR="deploy-prod"
             DEPLOYMENT_NAME="slack-bot-prod"
 
-          # release environment
           elif [[ "$ENV" == release-* ]]; then
             VERSION="${ENV#release-}"
             NAMESPACE="llm"
