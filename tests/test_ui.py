@@ -262,7 +262,7 @@ def main():
     forwarded_args = parse_forwarded_args()
 
     # Run test_bot.py in UNBUFFERED mode so we see prints live (-u)
-    cmd = [sys.executable, "-u", "test_bot.py"] + forwarded_args
+    cmd = [sys.executable, "-u", "tests/test_bot.py"] + forwarded_args
 
     state = RunState()
 
