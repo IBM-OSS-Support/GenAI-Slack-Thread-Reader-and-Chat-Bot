@@ -8,6 +8,8 @@ on:
         description: "Choose deployment environment"
         required: true
         options:
+          - main
+          - dev
           - test-deploy
          
 
