@@ -23,10 +23,10 @@ class ActionItemGenerator:
         self.logger = logger
         self.slack_app = slack_app
         self.model_type = model_type
-        self.model_name = model_name or os.getenv("OLLAMA_MODEL", "gemma:2b")
+        self.model_name = model_name or os.getenv("OLLAMA_MODEL_NAME", "granite3.3:8b")
         self.model = self.model_name
         self.ollama = ollama
-        self.ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
+        self.ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
         try:
             self.logger.info(f"Action item generator initialization started (model: {model_type})")
@@ -41,8 +41,8 @@ class ActionItemGenerator:
 
     def _init_ollama(self, model_name: str = None):
         """Initialize Ollama connection"""
-        self.ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
-        self.model_name = model_name or os.getenv("OLLAMA_MODEL", "gemma:2b")
+        self.ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        self.model_name = model_name or os.getenv("OLLAMA_MODEL_NAME", "granite3.3:8b")
         self.model = self.model_name
         try:
             response = requests.get(f"{self.ollama_url}/api/tags")

@@ -1,10 +1,18 @@
 import json
 import requests
+import os
+from dotenv import load_dotenv
 
-OLLAMA_API_URL = "http://localhost:11434/api/generate"
 
-def llama_infer(prompt: str, model: str = "llama3.2:latest") -> str:
-    response = requests.post(OLLAMA_API_URL, json={
+#OLLAMA_API_URL = "http://localhost:11434/api/generate"
+load_dotenv()  # load .env file
+
+OLLAMA_API_URL = os.getenv("OLLAMA_BASE_URL","http://localhost:11434/api/generate")
+
+def llama_infer(prompt: str, model: str = "granite3.3:8b") -> str:
+    response = requests.post(
+        f"{OLLAMA_API_URL}/api/generate", 
+        json={
         "model": model,
         "prompt": prompt,
         "stream": False
