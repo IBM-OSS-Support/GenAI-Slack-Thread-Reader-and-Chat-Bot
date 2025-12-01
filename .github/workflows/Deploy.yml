@@ -8,8 +8,9 @@ on:
         description: "Choose deployment environment"
         required: true
         options:
-          - test-deploy
+          - main
           - dev
+          - test-deploy
          
 
 jobs:
