@@ -75,7 +75,8 @@ jobs:
 
       - name: Login to registries
         run: |
-          echo "${{ secrets.GHCR_PAT }}"       | podman login ghcr.io     -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
+          echo "${{ secrets.DOCKER_PASSWORD }}" | buildah login docker.io -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+          echo "${{ secrets.GHCR_PAT }}"       | buildah login ghcr.io   -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
 
       - name: Build image
         run: |
