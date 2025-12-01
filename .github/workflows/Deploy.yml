@@ -1,4 +1,4 @@
-name: Build, Push & Deploy to OpenShift
+name: manual-deployment to ocp
 
 on:
   workflow_dispatch:
