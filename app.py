@@ -43,6 +43,7 @@ from utils.usage_guide import get_usage_guide
 from chains.analyze_thread import analyze_slack_thread, custom_chain, THREAD_ANALYSIS_BLOBS  # NEW
 from slack_sdk.models.blocks import SectionBlock, ActionsBlock, ButtonElement
 from datetime import datetime, timezone, timedelta
+from utils.slack_tools import fetch_slack_thread
 
 
 
@@ -1074,8 +1075,25 @@ def process_conversation(client: WebClient, event, text: str):
             detected_team = detect_real_team_from_event(None, event)
             target_team_id, summary = ROUTER.try_call(detected_team, _run_with_progress)
 
+            raw_slack_data = fetch_slack_thread(client, cid, ts10)
+            response_ts = ts10
+            for element in raw_slack_data:
+                if "clicked I am reviewing this request." in element['text']:
+                    response_ts = element['ts']
+
+            response_elapsed_time = human_elapsed(ts10,response_ts)
+
             summary = summary.replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
             card.finish(ok=True)
+
+            send_message(
+                get_client_for_team(target_team_id),
+                ch,
+                "Response Time: " + response_elapsed_time,
+                thread_ts=thread,
+                user_id=uid,
+                export_pdf=(cid in FORMATTED_CHANNELS)
+            )
 
             send_message(
                 get_client_for_team(target_team_id),
@@ -1191,6 +1209,13 @@ def process_conversation(client: WebClient, event, text: str):
 
 # ── File share handler ──
 # Replace your handle_file_share function with this corrected version:
+
+def human_elapsed(start_ts: str, end_ts: str) -> str:
+    total = int(float(end_ts) - float(start_ts))
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, seconds = divmod(rem, 60)
+    return f"{days}d {hours}h {minutes}m {seconds}s"
 
 @app.event({"type": "message", "subtype": "file_share"})
 def handle_file_share(body, event, client: WebClient, logger):
