@@ -45,9 +45,6 @@ from slack_sdk.models.blocks import SectionBlock, ActionsBlock, ButtonElement
 from datetime import datetime, timezone, timedelta
 from utils.slack_tools import fetch_slack_thread
 
-
-
-
 # Instantiate a single global vector store
 # THREAD_VECTOR_STORES: dict[str, FaissVectorStore] = {}
 if not os.path.exists("data"):
@@ -63,6 +60,10 @@ TEAM_BOT_TOKENS = {
 formatted = os.getenv("FORMATTED_CHANNELS", "")
 FORMATTED_CHANNELS = {ch.strip() for ch in formatted.split(",") if ch.strip()}
 logging.info(f"Formatted channels: {FORMATTED_CHANNELS}")
+
+# string identifiers
+SUPPORT_ESCALATION_RESPONSE_STRING = "Your escalation has been received and is being reviewed by"
+NOT_APPLICABLE = "Not Applicable"
 
 # Prevent the spinner → warning when user picks a channel from home-tab dropdown
 USER_SELECTED_CHANNELS: dict[str, str] = {}  # optional in-memory cache (user_id -> channel_id)
@@ -1075,25 +1076,19 @@ def process_conversation(client: WebClient, event, text: str):
             detected_team = detect_real_team_from_event(None, event)
             target_team_id, summary = ROUTER.try_call(detected_team, _run_with_progress)
 
+            # calculate incident acknowledgement response time
             raw_slack_data = fetch_slack_thread(client, cid, ts10)
-            response_ts = ts10
+            response_ts = None
             for element in raw_slack_data:
-                if "clicked I am reviewing this request." in element['text']:
+                if SUPPORT_ESCALATION_RESPONSE_STRING in element['text']:
                     response_ts = element['ts']
 
             response_elapsed_time = human_elapsed(ts10,response_ts)
 
             summary = summary.replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
+            if response_elapsed_time != NOT_APPLICABLE:
+                summary = summary + "\n\n*Support Response Time*\n- "+ response_elapsed_time
             card.finish(ok=True)
-
-            send_message(
-                get_client_for_team(target_team_id),
-                ch,
-                "Response Time: " + response_elapsed_time,
-                thread_ts=thread,
-                user_id=uid,
-                export_pdf=(cid in FORMATTED_CHANNELS)
-            )
 
             send_message(
                 get_client_for_team(target_team_id),
@@ -1211,11 +1206,26 @@ def process_conversation(client: WebClient, event, text: str):
 # Replace your handle_file_share function with this corrected version:
 
 def human_elapsed(start_ts: str, end_ts: str) -> str:
-    total = int(float(end_ts) - float(start_ts))
+    if end_ts is None:
+        return NOT_APPLICABLE
+    
+    total = abs(int(float(end_ts) - float(start_ts)))
+
     days, rem = divmod(total, 86400)
     hours, rem = divmod(rem, 3600)
     minutes, seconds = divmod(rem, 60)
-    return f"{days}d {hours}h {minutes}m {seconds}s"
+
+    parts = []
+
+    if days:
+        parts.append(f"{days} day" + ("s" if days != 1 else ""))
+    if hours or days:
+        parts.append(f"{hours}h")
+    if minutes or hours or days:
+        parts.append(f"{minutes}m")
+    parts.append(f"{seconds}s")
+
+    return " ".join(parts)
 
 @app.event({"type": "message", "subtype": "file_share"})
 def handle_file_share(body, event, client: WebClient, logger):
