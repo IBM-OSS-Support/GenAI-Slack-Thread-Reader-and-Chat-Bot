@@ -1082,7 +1082,7 @@ def process_conversation(client: WebClient, event, text: str):
             raw_slack_data = fetch_slack_thread(client, cid, ts10)
             response_ts = None
             for element in raw_slack_data:
-                if SUPPORT_ESCALATION_RESPONSE_STRING in element['text']:
+                if response_ts is None and SUPPORT_ESCALATION_RESPONSE_STRING in element['text']:
                     response_ts = element['ts']
 
             response_elapsed_time = support_response_time(ts10,response_ts)
