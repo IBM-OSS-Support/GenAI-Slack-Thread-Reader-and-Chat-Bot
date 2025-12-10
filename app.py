@@ -1076,6 +1076,8 @@ def process_conversation(client: WebClient, event, text: str):
             detected_team = detect_real_team_from_event(None, event)
             target_team_id, summary = ROUTER.try_call(detected_team, _run_with_progress)
 
+            summary = summary.replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
+            
             # calculate incident acknowledgement response time
             raw_slack_data = fetch_slack_thread(client, cid, ts10)
             response_ts = None
@@ -1083,11 +1085,9 @@ def process_conversation(client: WebClient, event, text: str):
                 if SUPPORT_ESCALATION_RESPONSE_STRING in element['text']:
                     response_ts = element['ts']
 
-            response_elapsed_time = human_elapsed(ts10,response_ts)
+            response_elapsed_time = support_response_time(ts10,response_ts)
 
-            summary = summary.replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
-            if response_elapsed_time != NOT_APPLICABLE:
-                summary = summary + "\n\n*Support Response Time*\n- "+ response_elapsed_time
+            summary = summary + response_elapsed_time
             card.finish(ok=True)
 
             send_message(
@@ -1205,9 +1205,9 @@ def process_conversation(client: WebClient, event, text: str):
 # ── File share handler ──
 # Replace your handle_file_share function with this corrected version:
 
-def human_elapsed(start_ts: str, end_ts: str) -> str:
+def support_response_time(start_ts: str, end_ts: str) -> str:
     if end_ts is None:
-        return NOT_APPLICABLE
+        return ""
     
     total = abs(int(float(end_ts) - float(start_ts)))
 
@@ -1225,7 +1225,7 @@ def human_elapsed(start_ts: str, end_ts: str) -> str:
         parts.append(f"{minutes}m")
     parts.append(f"{seconds}s")
 
-    return " ".join(parts)
+    return "\n\n*Support Response Time*\n- " + " ".join(parts)
 
 @app.event({"type": "message", "subtype": "file_share"})
 def handle_file_share(body, event, client: WebClient, logger):
