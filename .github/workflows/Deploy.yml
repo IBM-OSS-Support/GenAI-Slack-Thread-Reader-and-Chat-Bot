@@ -87,7 +87,7 @@ jobs:
 
       - name: Build image
         run: |
-          podman build -t $IMAGE_NAME . > /tmp/build.log 2>&1 || {
+          sudo podman build -t $IMAGE_NAME . > /tmp/build.log 2>&1 || {
             echo "❌ Build failed"
             cat /tmp/build.log
             exit 1
@@ -95,7 +95,7 @@ jobs:
 
       - name: Push image
         run: |
-          podman push $IMAGE_NAME > /tmp/push.log 2>&1 || {
+         sudo podman push $IMAGE_NAME > /tmp/push.log 2>&1 || {
             echo "❌ Push failed"
             cat /tmp/push.log
             exit 1
