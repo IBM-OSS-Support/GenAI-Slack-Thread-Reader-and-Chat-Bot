@@ -82,12 +82,12 @@ jobs:
 
       - name: Login to registries
         run: |
-          echo "${{ secrets.DOCKER_PASSWORD }}" |  podman login docker.io -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
-          echo "${{ secrets.GHCR_PAT }}"       |   podman login ghcr.io     -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
+          echo "${{ secrets.DOCKER_PASSWORD }}" | sudo podman login docker.io -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+          echo "${{ secrets.GHCR_PAT }}"       | sudo podman login ghcr.io     -u "${{ secrets.GHCR_USERNAME }}" --password-stdin
 
       - name: Build image
         run: |
-          podman build -t $IMAGE_NAME . > /tmp/build.log 2>&1 || {
+          sudo  podman build -t $IMAGE_NAME . > /tmp/build.log 2>&1 || {
             echo "❌ Build failed"
             cat /tmp/build.log
             exit 1
@@ -95,7 +95,7 @@ jobs:
 
       - name: Push image
         run: |
-          podman push $IMAGE_NAME > /tmp/push.log 2>&1 || {
+          sudo podman push $IMAGE_NAME > /tmp/push.log 2>&1 || {
             echo "❌ Push failed"
             cat /tmp/push.log
             exit 1
