@@ -72,6 +72,13 @@ jobs:
                    -u ${{ secrets.OCP_USERNAME }} \
                    -p ${{ secrets.OCP_PASSWORD }} \
                    --certificate-authority=/tmp/ca.crt
+      - name: Debug runtime inside GitHub runner
+        run: |
+          echo "RUNNING AS USER: $(whoami)"
+          echo "--- which crun ---"
+          which crun || echo "crun NOT FOUND"
+          echo "--- podman info ---"
+          podman info | grep -i runtime || true
 
       - name: Login to registries
         run: |
