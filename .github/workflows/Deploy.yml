@@ -87,6 +87,7 @@ jobs:
 
       - name: Build image
         run: |
+          cd /var/home/core/github
           sudo  podman build -t $IMAGE_NAME . > /tmp/build.log 2>&1 || {
             echo "❌ Build failed"
             cat /tmp/build.log
@@ -95,6 +96,7 @@ jobs:
 
       - name: Push image
         run: |
+          cd /var/home/core/github
           sudo podman push $IMAGE_NAME > /tmp/push.log 2>&1 || {
             echo "❌ Push failed"
             cat /tmp/push.log
