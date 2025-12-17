@@ -44,7 +44,13 @@ from chains.analyze_thread import analyze_slack_thread, custom_chain, THREAD_ANA
 from slack_sdk.models.blocks import SectionBlock, ActionsBlock, ButtonElement
 from datetime import datetime, timezone, timedelta
 
+# ========================================================================================================================
+#for purpose todo acxtion item bot
 
+from helper.MainToDo import handle_dm_extraction,handle_channel_extraction,handle_thread_extraction,show_user_tasks
+from db import check_existing_task, delete_task, get_user_tasks, save_task_to_db
+
+# ========================================================================================================================
 
 
 # Instantiate a single global vector store
@@ -797,6 +803,46 @@ def process_conversation(client: WebClient, event, text: str):
     normalized = re.sub(
         r"<(https?://[^>|]+)(?:\|[^>]+)?>", r"\1", cleaned
     ).strip()
+    # ==========================================================
+    # EXTRACTION ToDo assistant
+    # ==========================================================
+    # Matches:
+    #   extract
+    #   extract from
+    #   extract dm between
+    txt = cleaned.lower().strip()
+    m_extract = re.search(r"\bextract(?: dm between| from)?\b", txt, re.IGNORECASE)
+
+    if m_extract:
+
+        # 1) --- DM extraction ---
+        if "extract dm between" in txt:
+            return handle_dm_extraction(event, client)
+
+        # 2) --- Channel extraction ---
+        # requires extract + from + to
+        if all(k in txt for k in ["extract", "from", "to"]):
+            return handle_channel_extraction(event, client)
+
+        # 3) --- Thread extraction fallback ---
+        if thread != ts:
+            return handle_thread_extraction(event, client)
+    
+    m_tasks = re.search(
+        r"\b(?:show\s+)?my\s+tasks?\b|\bshow\s+tasks?\b",
+        text,
+        re.IGNORECASE
+    )
+    
+    if m_tasks:
+        user_id = uid
+        channel_id = ch
+        thread_ts = thread
+        show_user_tasks(user_id, channel_id, thread_ts)
+        return
+        #end
+
+    # ==========================================================
     normalized = normalized.replace("’","'").replace("‘","'").replace("“",'"').replace("”",'"')
     m_prod = re.match(r"^-\s*(?:g\s+)?product\s+(.+)$", normalized, re.IGNORECASE)
     if m_prod:
@@ -2014,7 +2060,186 @@ def handle_button_click(ack, body, client, logger):
     except Exception as e:
         logger.error(f"Error responding to button click: {e}")
 
+# ===============================================================================================================
+######ToDo action  item event starting here
+@app.action(re.compile("task_checkbox_.*"))
+def handle_task_checkbox(ack, body, action,logger=None):
+    ack()
+    try:
+        user_id = body["user"]["id"]
+        channel_id = body["channel"]["id"]
+        message_ts = body["message"]["ts"]
 
+        user_info = app.client.users_info(user=user_id)
+        user_name = user_info["user"]["profile"].get("display_name") or user_info["user"]["profile"].get("real_name") or user_info["user"]["name"]
+
+        selected = action.get("selected_options", [])
+        if not selected:
+            return
+
+        value = selected[0]["value"]
+        assigned_user, task_description, deadline = value.split("|")
+
+        if assigned_user.lower() != user_name.lower():
+            app.client.chat_postEphemeral(
+                channel=channel_id,
+                user=user_id,
+                text=f"Only {assigned_user} can claim this task."
+            )
+            return
+        
+        if check_existing_task(user_id, task_description):
+            app.client.chat_postEphemeral(
+                channel=channel_id,
+                user=user_id,
+                text=f"You already claimed this task: {task_description}"
+            )
+            logger.info(f"Duplicate task prevented for user={user_name}: {task_description}")
+            return
+        
+        task_id = save_task_to_db(
+            user_id=user_id,
+            user_name=user_name,
+            task_description=task_description,
+            deadline=None if deadline == "No Deadline" else deadline,
+            channel_id=channel_id,
+            message_ts=message_ts,
+            original_thread_ts=None
+        )
+
+        if task_id:
+            app.client.chat_postMessage(
+                channel=channel_id,
+                thread_ts=message_ts,
+                text=f"Task claimed by {user_name}\nTask: {task_description}\nDeadline: {deadline}\nTask ID: {task_id}"
+            )
+            logger.info(f"Task claimed successfully: ID={task_id}, User={user_name}")
+
+    except Exception as e:
+        logger.error(f"Error handling checkbox: {str(e)}", exc_info=True)
+        app.client.chat_postEphemeral(
+            channel=channel_id,
+            user=user_id,
+            text=f"Error claiming task. Please try again."
+        )
+@app.action("claim_task_action")
+def handle_claim_task_action(ack, body, client, logger=None):
+    ack()
+    try:
+        user_id = body["user"]["id"]
+        user_info = client.users_info(user=user_id)
+        user_name = user_info["user"]["profile"]["real_name"]
+
+        channel_id = body["channel"]["id"]
+        message_ts = body["message"]["ts"]
+        original_thread_ts = body.get("container", {}).get("thread_ts")
+
+        action = body["actions"][0]
+
+        selected = [opt["value"] for opt in action.get("selected_options", [])]
+        previous = [opt["value"] for opt in action.get("initial_options", [])] if action.get("initial_options") else []
+
+        new_selection = list(set(selected) - set(previous))
+        if not new_selection:
+            logger.info("No new checkbox selected (could be deselection).")
+            return
+
+        value = new_selection[0]
+
+        parts = value.split("|")
+        if len(parts) >= 3:
+            responsible = parts[0].strip() or user_name
+            task_description = parts[1].strip()
+            deadline = parts[2].strip()
+        elif len(parts) == 2:
+            responsible = parts[0].strip() or user_name
+            task_description = parts[1].strip()
+            deadline = ""
+        else:
+            responsible = user_name
+            task_description = value.strip()
+            deadline = ""
+
+        if not task_description:
+            client.chat_postEphemeral(
+                channel=channel_id,
+                user=user_id,
+                text="?? Could not extract task description."
+            )
+            return
+
+        task_id = save_task_to_db(
+            user_id=user_id,
+            user_name=user_name,
+            task_description=task_description,
+            deadline=deadline if deadline and deadline != "No Deadline" else None,
+            channel_id=channel_id,
+            message_ts=message_ts,
+            original_thread_ts=original_thread_ts,
+        )
+
+        if task_id:
+            client.chat_postEphemeral(
+                channel=channel_id,
+                user=user_id,
+                text=(
+                    f"? *Task claimed by {user_name}*\n"
+                    f"*Task:* {task_description}\n"
+                    f"*Deadline:* {deadline or 'No Deadline'}\n"
+                    f"*Task ID:* `{task_id}`"
+                )
+            )
+        else:
+            client.chat_postEphemeral(
+                channel=channel_id,
+                user=user_id,
+                text=f"? Failed to save task: {task_description}"
+            )
+
+    except Exception as e:
+        logger.error(f"Error handling claim task: {e}", exc_info=True)
+        client.chat_postEphemeral(
+            channel=body.get("channel", {}).get("id", ""),
+            user=body.get("user", {}).get("id", ""),
+            text=f"Error saving task: {str(e)}"
+        )
+@app.action("select_tasks_to_delete")
+def handle_select_tasks_to_delete(ack, body, logger):
+    ack()
+    logger.info("Checkbox interaction received")
+@app.action("delete_selected_tasks")
+def handle_delete_selected_tasks(ack, body, client, say):
+    ack()
+    user_id = body["user"]["id"]
+
+    # Find selected checkboxes
+    selected_tasks = []
+    for block in body["state"]["values"].values():
+        for action in block.values():
+            if action["type"] == "checkboxes":
+                selected_tasks = [opt["value"] for opt in action.get("selected_options", [])]
+
+    if not selected_tasks:
+        say(text="Please select at least one task to delete.", thread_ts=body["message"]["ts"])
+        return
+
+    # Delete tasks
+    deleted_count = 0
+    for task_id in selected_tasks:
+        deleted = delete_task(task_id)
+        if deleted:
+            deleted_count += 1
+
+    say(
+        text=f"Deleted {deleted_count} task(s).",
+        thread_ts=body["message"]["ts"]
+    )
+
+    # Refresh updated task list
+    show_user_tasks(user_id, body["channel"]["id"], body["message"]["ts"], say)
+
+######ToDo action  item event ending here
+# ===============================================================================================================
 if __name__=="__main__":
     try:
         index_startup_files()
