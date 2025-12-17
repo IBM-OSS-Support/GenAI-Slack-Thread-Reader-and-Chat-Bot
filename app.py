@@ -43,9 +43,7 @@ from utils.usage_guide import get_usage_guide
 from chains.analyze_thread import analyze_slack_thread, custom_chain, THREAD_ANALYSIS_BLOBS  # NEW
 from slack_sdk.models.blocks import SectionBlock, ActionsBlock, ButtonElement
 from datetime import datetime, timezone, timedelta
-
-
-
+from utils.slack_tools import fetch_slack_thread
 
 # Instantiate a single global vector store
 # THREAD_VECTOR_STORES: dict[str, FaissVectorStore] = {}
@@ -62,6 +60,10 @@ TEAM_BOT_TOKENS = {
 formatted = os.getenv("FORMATTED_CHANNELS", "")
 FORMATTED_CHANNELS = {ch.strip() for ch in formatted.split(",") if ch.strip()}
 logging.info(f"Formatted channels: {FORMATTED_CHANNELS}")
+
+# string identifiers
+SUPPORT_ESCALATION_RESPONSE_STRING = "Your escalation has been received and is being reviewed by"
+NOT_APPLICABLE = "Not Applicable"
 
 # Prevent the spinner → warning when user picks a channel from home-tab dropdown
 USER_SELECTED_CHANNELS: dict[str, str] = {}  # optional in-memory cache (user_id -> channel_id)
@@ -1075,6 +1077,17 @@ def process_conversation(client: WebClient, event, text: str):
             target_team_id, summary = ROUTER.try_call(detected_team, _run_with_progress)
 
             summary = summary.replace("[DD/MM/YYYY HH:MM UTC]", "").replace("*@username*", "").strip()
+            
+            # calculate incident acknowledgement response time
+            raw_slack_data = fetch_slack_thread(client, cid, ts10)
+            response_ts = None
+            for element in raw_slack_data:
+                if response_ts is None and SUPPORT_ESCALATION_RESPONSE_STRING in element['text']:
+                    response_ts = element['ts']
+
+            response_elapsed_time = support_response_time(ts10,response_ts)
+
+            summary = summary + response_elapsed_time
             card.finish(ok=True)
 
             send_message(
@@ -1191,6 +1204,28 @@ def process_conversation(client: WebClient, event, text: str):
 
 # ── File share handler ──
 # Replace your handle_file_share function with this corrected version:
+
+def support_response_time(start_ts: str, end_ts: str) -> str:
+    if end_ts is None:
+        return ""
+    
+    total = abs(int(float(end_ts) - float(start_ts)))
+
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, seconds = divmod(rem, 60)
+
+    parts = []
+
+    if days:
+        parts.append(f"{days} day" + ("s" if days != 1 else ""))
+    if hours or days:
+        parts.append(f"{hours}h")
+    if minutes or hours or days:
+        parts.append(f"{minutes}m")
+    parts.append(f"{seconds}s")
+
+    return "\n\n*Support Response Time*\n- " + " ".join(parts)
 
 @app.event({"type": "message", "subtype": "file_share"})
 def handle_file_share(body, event, client: WebClient, logger):
